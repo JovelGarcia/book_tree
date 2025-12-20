@@ -18,10 +18,10 @@ def extract_chapters_from_epub(epub_path):
 
             if "chapter" in item.get_name().lower():
                 match = re.search(r'chapter[_\s-]*(\d+)', item.get_name().lower())
-                chapter_num = int(match.group(1)) if match else None
+                chapter_number = int(match.group(1)) if match else None
 
                 chapters.append({
-                    'number': chapter_num,
+                    'chapter_number': chapter_number,
                     'title': item.get_name(),
                     'content': text[:250]
                 })
@@ -36,12 +36,26 @@ def process_epub_file(epub_id):
         epub.status = 'pr'
         epub.save()
 
-        file_path = epub.file
+        file_path = epub.file.path
 
         chapters_data = extract_chapters_from_epub(file_path)
 
         for chapter_data in chapters_data:
-            print(f"{chapter_data}")
+            Chapter.objects.create(
+                epub = epub,
+                title=chapter_data['title'],
+                content = chapter_data['content'],
+                chapter_number = chapter_data['chapter_number']
+
+            )
+
+        epub.status = 'c'
+        epub.processed = True
+        epub.save()
+
+        return True
+
+
 
     except Exception as e:
         if epub:

@@ -36,6 +36,7 @@ class Command(BaseCommand):
 
                 if reprocess:
                     epub.characters.all().delete()
+                    epub.chapters.all().delete()
 
                 success = process_epub_file(epub.id)
 
@@ -63,6 +64,7 @@ class Command(BaseCommand):
 
                 if reprocess:
                     epub.characters.all().delete()
+                    epub.chapters.all().delete()
                     epub.status = 'p'
                     epub.save()
 
