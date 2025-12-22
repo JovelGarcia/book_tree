@@ -30,6 +30,7 @@ class Chapter(models.Model):
     title = models.CharField(max_length=500, blank=True)
     content = models.TextField()
     chapter_number = models.IntegerField()
+    annotated_sentences = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ['epub', 'chapter_number']

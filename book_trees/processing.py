@@ -69,10 +69,14 @@ def process_epub_file(epub_id):
 
 def extract_characters_simple(epub_id):
     """
-    Placeholder for character extraction.
-    This will be implemented with spaCy/NLP later.
+    Extracts character names from EPUBn using spaCy NER
+
+    Args:
+        epub_id: ID of the EpubFile to process
+
+    Returns:
+        Number of unique characters found
     """
-    # TODO: Implement NER-based character extraction
     epub = EpubFile.objects.get(id=epub_id)
     chapters = epub.chapters.all()
 
@@ -82,29 +86,47 @@ def extract_characters_simple(epub_id):
 
     for chapter in chapters:
         doc = nlp(chapter.content)
+        annotated_sentences = []
 
-        for ent in doc.ents:
-            if ent.label_ == 'PERSON':
-                name = ent.text.strip()
+        for sent in doc.sents:
+            entities_in_sentence = []
 
-                #skip single letters, common false positive
-                if len(name) <= 1:
-                    continue
+            for ent in sent.ents:
+                if ent.label_ == 'PERSON':
+                    name = ent.text.strip()
+                    name = name.rstrip("'s")
 
-                character_counts[name] = character_counts.get(name, 0) + 1
+                    #skip single letters, common false positive
+                    if len(name) <= 1:
+                        continue
 
-                if name not in first_appearance:
-                    first_appearance[name] = chapter.chapter_number
+                    entities_in_sentence.append(name)
 
-    # TODO: Create & save objects
-    # for name, count in character_counts.items():
-    #     Character.objects.update_or_create(
-    #
-    #     )
+                    character_counts[name] = character_counts.get(name, 0) + 1
 
-    print (character_counts)
+                    if name not in first_appearance:
+                        first_appearance[name] = chapter.chapter_number
 
-    pass
+            if entities_in_sentence:
+                annotated_sentences.append({
+                    'text': sent.text.strip(),
+                    'characters': entities_in_sentence
+                })
+
+        chapter.annotated_sentences = annotated_sentences
+        chapter.save()
+
+    for name, count in character_counts.items():
+        Character.objects.update_or_create(
+            epub = epub,
+            name = name,
+            defaults = {
+                'mention_count': count,
+                'first_appearance_chapter': first_appearance[name]
+            }
+        )
+
+    return len(character_counts)
 
 
 def extract_relationships_simple(epub_id):

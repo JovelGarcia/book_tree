@@ -13,7 +13,7 @@ class EpubFileAdmin(admin.ModelAdmin):
 #ChapterAdmin
 @admin.register(Chapter)
 class ChapterAdmin(admin.ModelAdmin):
-    list_display = ['epub', 'title', 'chapter_number', 'content']
+    list_display = ['epub', 'title', 'chapter_number', 'content', 'annotated_sentences']
     list_filter = ['epub']
     search_fields = ['chapter_number']
     readonly_fields = ['content', 'epub']
