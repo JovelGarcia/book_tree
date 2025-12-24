@@ -52,21 +52,20 @@ class Character(models.Model):
         unique_together = ['epub', 'name']
 
     def __str__(self):
-        return f"{self.name} {self.epub.original_filename}"
+        return f"{self.name}"
 
 
 
 class Relationship(models.Model):
     epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE)
     character_1 = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_1')
-    character_2 = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationshios_as_character_2')
+    character_2 = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_2')
     relationship_type = models.CharField(max_length=100)
     confidence = models.FloatField(default=0.0)
-    supporting_text = models.TextField(blank=True)
-    chapter_found = models.IntegerField(null=True, blank=True)
+    evidence = models.JSONField(default=list, blank=True)
 
     class Meta:
-        unique_together = ['character_1', 'character_2', 'relationship_type']
+        unique_together = ['epub', 'character_1', 'character_2', 'relationship_type']
 
     def __str__(self):
         return f"{self.character_1.name} - {self.relationship_type} - {self.character_2.name}"

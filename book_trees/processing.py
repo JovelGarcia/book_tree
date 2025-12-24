@@ -130,11 +130,73 @@ def extract_characters_simple(epub_id):
 
 
 def extract_relationships_simple(epub_id):
-    """
-    Placeholder for relationship extraction.
-    This will be implemented with pattern matching or LLM later.
-    """
-    # TODO: Implement relationship extraction
-    pass
+    epub = EpubFile.objects.get(id=epub_id)
+    chapters = epub.chapters.all()
+
+    relationship_keywords = {
+        'brother': ['brother', 'bro'],
+        'sister': ['sister', 'sis'],
+        'cousin': ['cousin'],
+        'father': ['father', 'dad', 'papa', 'daddy'],
+        'mother': ['mother', 'mom', 'mama', 'mommy'],
+        'uncle': ['uncle', 'unc'],
+        'aunt': ['aunt', 'auntie']
+    }
+
+    relationships_found = 0
+
+    for chapter in chapters:
+        for sentence_data in chapter.annotated_sentences:
+            characters = sentence_data['characters']
+            text = sentence_data['text']
+
+            if len(characters)  >= 2:
+                for relationship_type, keywords in relationship_keywords.items():
+                    for keyword in keywords:
+
+                        pattern = rf"\b{keyword}(?:'s)?\b"
+                        if re.search(pattern, text, re.IGNORECASE):
+                            other_chars = [c for c in characters if c not in [characters[0], characters[1]]]
+
+                            try:
+                                char1_object = Character.objects.get(epub=epub, name=characters[0])
+                                char2_object = Character.objects.get(epub=epub, name=characters[1])
+
+                            except Character.DoesNotExist:
+                                continue
+
+                            rel, created = Relationship.objects.get_or_create(
+                                epub=epub,
+                                character_1=char1_object,
+                                character_2=char2_object,
+                                relationship_type=relationship_type,
+                                defaults={
+                                    'confidence': 0.7,
+                                    'evidence': []
+                                }
+                            )
+
+                            new_evidence = {
+                                'chapter': chapter.chapter_number,
+                                'text': text,
+                                'other_characters': other_chars
+                            }
+
+                            if new_evidence not in rel.evidence:
+                                rel.evidence.append(new_evidence)
+
+                                rel.confidence=min(0.95, 0.7 + len(rel.evidence) * 0.05)
+                                rel.save()
+
+                            relationships_found += 1
+                            break
+
+    return relationships_found
+
+
+
+
+
+
 
 
