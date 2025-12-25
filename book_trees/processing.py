@@ -1,6 +1,7 @@
 import ebooklib
 import re
 import spacy
+import json
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from django.db import transaction
@@ -67,8 +68,99 @@ def process_epub_file(epub_id):
             epub.save()
         raise
 
+
+def extract_characters_with_chunks(epub_id, context_sentences=2):
+    """
+    Extracts character names from EPUB using spaCy NER and creates chunks with context
+    Avoids overlapping chunks by advancing past the context window
+
+    Args:
+        epub_id: ID of the EpubFile to process
+        context_sentences: Number of sentences before/after to include in chunk
+
+    Returns:
+        Number of unique characters found
+    """
+    epub = EpubFile.objects.get(id=epub_id)
+    chapters = epub.chapters.all()
+
+    character_counts = {}
+    first_appearance = {}
+
+    for chapter in chapters:
+        doc = nlp(chapter.content)
+
+        sentences = list(doc.sents)
+        annotated_chunks = []
+
+        i = 0
+        while i < len(sentences):
+            sent = sentences[i]
+            entities_in_sentence = []
+
+            for ent in sent.ents:
+                if ent.label_ == 'PERSON':
+                    name = ent.text.strip()
+                    name = name.rstrip("'s")
+
+                    # skip single letters, common false positive
+                    if len(name) <= 1:
+                        continue
+
+                    entities_in_sentence.append(name)
+
+                    character_counts[name] = character_counts.get(name, 0) + 1
+
+                    if name not in first_appearance:
+                        first_appearance[name] = chapter.chapter_number
+
+            if entities_in_sentence:
+                start_idx = max(0, i - context_sentences)
+                end_idx = min(len(sentences), i + context_sentences + 1)
+
+                context_sents = sentences[start_idx:end_idx]
+                context_text = ' '.join([s.text.strip() for s in context_sents])
+
+                all_characters_in_context = set(entities_in_sentence)
+                for context_sent in context_sents:
+                    for ent in context_sent.ents:
+                        if ent.label_ == 'PERSON':
+                            char_name = ent.text.strip().rstrip("'s")
+                            if len(char_name) > 1:
+                                all_characters_in_context.add(char_name)
+
+                annotated_chunks.append({
+                    'center_sentence': sent.text.strip(),
+                    'context': context_text,
+                    'characters_in_sentence': entities_in_sentence,
+                    'characters_in_context': list(all_characters_in_context),
+                    'sentence_index': i
+                })
+
+                i = end_idx
+            else:
+                i += 1
+
+        chapter.annotated_sentences = annotated_chunks
+        chapter.save()
+
+    for name, count in character_counts.items():
+        Character.objects.update_or_create(
+            epub=epub,
+            name=name,
+            defaults={
+                'mention_count': count,
+                'first_appearance_chapter': first_appearance[name]
+            }
+        )
+
+    return len(character_counts)
+
+
 def extract_characters_simple(epub_id):
     """
+    LEGACY FUNCTION
+
     Extracts character names from EPUBn using spaCy NER
 
     Args:
@@ -129,7 +221,11 @@ def extract_characters_simple(epub_id):
     return len(character_counts)
 
 
+
 def extract_relationships_simple(epub_id):
+    """
+    LEGACY FUNCTION
+    """
     epub = EpubFile.objects.get(id=epub_id)
     chapters = epub.chapters.all()
 
