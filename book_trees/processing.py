@@ -2,10 +2,12 @@ import ebooklib
 import re
 import spacy
 import json
+import requests
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from django.db import transaction
 from .models import EpubFile, Chapter, Character, Relationship
+from typing import List, Dict, Any
 
 # load NLP
 nlp = spacy.load("en_core_web_sm")
@@ -155,6 +157,112 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
         )
 
     return len(character_counts)
+
+
+def analyze_chunk_with_llm(chunk_data: Dict[str, Any], api_key: str = None) -> List[Dict]:
+    """
+    Sends a curated chunk with multiple characters to Gemini 2.5 Flash-Lite for relationship analysis.
+
+    Args:
+        chunk_data: Dictionary containing:
+            - context: str - The text chunk with context
+            - characters_in_context: List[str] - Character names mentioned
+            - chapter_number: int - Chapter number for reference
+        api_key: Google API Key
+
+    Returns:
+        List of relationship dictionaries extracted from the LLM response
+    """
+
+    # Only analyze chunks with 2+ characters
+    if len(chunk_data.get('characters_in_context', [])) < 2:
+        return []
+
+    # Prepare the prompt
+    prompt = f"""Analyze the following text excerpt and identify relationships between characters.
+
+Text excerpt:
+{chunk_data['context']}
+
+Characters mentioned: {', '.join(chunk_data['characters_in_context'])}
+
+Instructions:
+1. Identify EXPLICIT relationships only (stated or strongly implied in the text)
+2. Return relationships as JSON in this exact format:
+{{
+    "relationships": [
+        {{
+            "character_1": "Name1",
+            "character_2": "Name2",
+            "relationship_type": "one of: family, romantic, friend, ally, enemy, mentor, master_servant, other",
+            "specific_type": "brother/sister/father/mother/friend/rival/etc",
+            "confidence": 0.0-1.0,
+            "evidence": "exact quote or paraphrase from text"
+        }}
+    ]
+}}
+
+3. Use exact character names as they appear in the "Characters mentioned" list
+4. Be specific: prefer "brother" over just "family"
+5. Return ONLY valid JSON, no other text
+"""
+
+    try:
+        # Call Gemini 2.5 Flash-Lite API
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}",
+            headers={
+                "Content-Type": "application/json",
+            },
+            json={
+                "contents": [{
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }],
+                "generationConfig": {
+                    "temperature": 0.3,
+                    "maxOutputTokens": 2048,
+                    "responseMimeType": "application/json"  # Forces JSON output
+                }
+            },
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        # Extract the response
+        result = response.json()
+
+        # Gemini's response structure
+        if 'candidates' in result and len(result['candidates']) > 0:
+            content = result['candidates'][0]['content']['parts'][0]['text'].strip()
+        else:
+            print(f"Unexpected Gemini response format: {result}")
+            return []
+
+        # Parse the JSON response (should already be clean JSON due to responseMimeType)
+        parsed_data = json.loads(content)
+        relationships = parsed_data.get('relationships', [])
+
+        # Add chapter reference to each relationship
+        for rel in relationships:
+            rel['chapter_number'] = chunk_data.get('chapter_number')
+
+        return relationships
+
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response content: {e.response.text}")
+        return []
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse JSON response: {e}")
+        print(f"Response content: {content}")
+        return []
+    except Exception as e:
+        print(f"Unexpected error in LLM analysis: {e}")
+        return []
 
 
 def extract_characters_simple(epub_id):
