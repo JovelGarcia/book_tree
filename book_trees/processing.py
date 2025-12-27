@@ -265,6 +265,80 @@ Instructions:
         return []
 
 
+def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size: int = 10):
+    """
+    Extract relationships from an EPUB using LLM analysis on chunked text.
+
+    Args:
+        epub_id: ID of the EpubFile to process
+        api_key: API key for the LLM service
+        batch_size: Number of chunks to process at once (for rate limiting)
+
+    Returns:
+        Number of relationships found
+    """
+
+    epub = EpubFile.objects.get(id=epub_id)
+    chapters = epub.chapters.all()
+
+    relationships_found = 0
+    all_relationships = []
+
+    for chapter in chapters:
+        chunks = chapter.annotated_sentences or []
+
+        for chunk in chunks:
+            # process chunks with 2 or more characters
+            if len(chunk.get('characters_in_context', [])) < 2:
+                continue
+
+            chunk_with_chapter = {
+                **chunk,
+                'chapter_number': chapter.chapter_number
+            }
+
+            relationships = analyze_chunk_with_llm(chunk_with_chapter, api_key)
+            all_relationships.extend(relationships)
+
+
+    with transaction.atomic():
+        for rel_data in all_relationships:
+            try:
+                char1 = Character.objects.get(epub=epub, name=rel_data['character_1'])
+                char2 = Character.objects.get(epub=epub, name=rel_data['character_2'])
+
+                rel, created = Relationship.objects.get_or_create(
+                    epub=epub,
+                    character_1=char1,
+                    character_2=char2,
+                    relationship_type=rel_data['relationship_type'],
+                    defaults={
+                        'confidence': rel_data.get('confidence', 0.7),
+                        'evidence': []
+                    }
+                )
+
+                evidence_entry = {
+                    'chapter': rel_data.get('chapter_number'),
+                    'specific_type': rel_data.get('specific_type'),
+                    'evidence': rel_data.get('evidence'),
+                    'confidence': rel_data.get('confidence')
+                }
+
+                rel.evidence.append(evidence_entry)
+
+                # TODO: Update confidence and prevent duplicates
+
+            except Character.DoesNotExist:
+                print(f"Character not found: {rel_data.get('character_1')} or {rel_data.get('character_2')}")
+                continue
+            except Exception as e:
+                print(f"Error processing relationship: {e}")
+                continue
+
+    return relationships_found
+
+
 def extract_characters_simple(epub_id):
     """
     LEGACY FUNCTION
