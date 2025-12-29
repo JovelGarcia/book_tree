@@ -288,7 +288,7 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
         chunks = chapter.annotated_sentences or []
 
         for chunk in chunks:
-            # process chunks with 2 or more characters
+            # process chunks with 2+ characters
             if len(chunk.get('characters_in_context', [])) < 2:
                 continue
 
@@ -327,7 +327,15 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
 
                 rel.evidence.append(evidence_entry)
 
-                # TODO: Update confidence and prevent duplicates
+
+                if evidence_entry not in rel.evidence:
+                    rel.evidence.append(evidence_entry)
+
+                    avg_confidence = sum(e.get('confidence', 0.7) for e in rel.evidence) / len(rel.evidence)
+                    rel.confidence = min(0.95, avg_confidence)
+
+                    rel.save()
+                    relationships_found += 1
 
             except Character.DoesNotExist:
                 print(f"Character not found: {rel_data.get('character_1')} or {rel_data.get('character_2')}")
