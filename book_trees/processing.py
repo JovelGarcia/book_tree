@@ -159,6 +159,72 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
     return len(character_counts)
 
 
+def find_character_name_variations(epub_id):
+    """
+    Find character name variations that should be merged.
+    Uses multiple strategies:
+    1. Substring matching (e.g., "Harry" in "Harry Potter")
+    2. String similarity (e.g., "Jon" vs "John")
+    3. Common patterns (e.g., "Mr. Smith" vs "Smith")
+
+    Returns:
+        List of character groups that should be merged
+    """
+    characters = Character.objects.filter(epub=epub_id).order_by('-mention_count')
+
+    # Build similarity groups
+    groups = []
+    used = set()
+
+    for i, char1 in enumerate(characters):
+        if char1.id in used:
+            continue
+
+        group = [char1]
+        name1 = char1.name.lower().strip()
+
+        for char2 in characters[i + 1:]:
+            if char2.id in used:
+                continue
+
+            name2 = char2.name.lower().strip()
+
+            # Strategy 1: Substring matching
+            if name1 in name2 or name2 in name1:
+                # Only merge if length difference isn't too large
+                if max(len(name1), len(name2)) / min(len(name1), len(name2)) <= 2:
+                    group.append(char2)
+                    used.add(char2.id)
+                    continue
+
+            # Strategy 2: String similarity (for typos, abbreviations)
+            similarity = SequenceMatcher(None, name1, name2).ratio()
+            if similarity >= 0.85:  # Very similar
+                group.append(char2)
+                used.add(char2.id)
+                continue
+
+            # Strategy 3: First/last name matching
+            parts1 = name1.split()
+            parts2 = name2.split()
+
+            # Check if they share a significant name part
+            for part1 in parts1:
+                if len(part1) >= 3:  # Skip titles like "Mr"
+                    for part2 in parts2:
+                        if part1 == part2 and len(part1) >= 4:
+                            group.append(char2)
+                            used.add(char2.id)
+                            break
+
+        if len(group) > 1:
+            groups.append(group)
+
+        used.add(char1.id)
+
+    return groups
+
+
 def analyze_chunk_with_llm(chunk_data: Dict[str, Any], api_key: str = None) -> List[Dict]:
     """
     Sends a curated chunk with multiple characters to Gemini 2.5 Flash-Lite for relationship analysis.
