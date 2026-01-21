@@ -331,6 +331,77 @@ Instructions:
         return []
 
 
+def merge_characters(primary_character, characters_to_merge):
+    """
+    Merge multiple character records into one primary character.
+    Updates all relationships and annotations.
+    """
+    with transaction.atomic():
+        # Combine mention counts
+        total_mentions = primary_character.mention_count
+        for char in characters_to_merge:
+            if char.id != primary_character.id:
+                total_mentions += char.mention_count
+
+        primary_character.mention_count = total_mentions
+
+        # Store aliases (if your model supports it)
+        if hasattr(primary_character, 'aliases'):
+            if not primary_character.aliases:
+                primary_character.aliases = []
+
+            for char in characters_to_merge:
+                if char.id != primary_character.id and char.name not in primary_character.aliases:
+                    primary_character.aliases.append(char.name)
+
+        primary_character.save()
+
+        # Update all relationships
+        for char in characters_to_merge:
+            if char.id == primary_character.id:
+                continue
+
+            # Update relationships where this character is character_1
+            Relationship.objects.filter(character_1=char).update(character_1=primary_character)
+
+            # Update relationships where this character is character_2
+            Relationship.objects.filter(character_2=char).update(character_2=primary_character)
+
+            # Delete the old character
+            char.delete()
+
+        # Remove duplicate relationships (same char_1, char_2, type)
+        relationships = Relationship.objects.filter(
+            character_1=primary_character
+        ) | Relationship.objects.filter(
+            character_2=primary_character
+        )
+
+        seen = set()
+        for rel in relationships:
+            key = (
+                min(rel.character_1.id, rel.character_2.id),
+                max(rel.character_1.id, rel.character_2.id),
+                rel.relationship_type
+            )
+
+            if key in seen:
+                # Find and merge duplicate
+                duplicate = Relationship.objects.filter(
+                    character_1__in=[rel.character_1, rel.character_2],
+                    character_2__in=[rel.character_1, rel.character_2],
+                    relationship_type=rel.relationship_type
+                ).exclude(id=rel.id).first()
+
+                if duplicate:
+                    # Merge evidence before deleting
+                    duplicate.evidence.extend(rel.evidence)
+                    duplicate.save()
+                    rel.delete()
+            else:
+                seen.add(key)
+
+
 def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size: int = 10):
     """
     Extract relationships from an EPUB using LLM analysis on chunked text.
