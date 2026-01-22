@@ -402,6 +402,52 @@ def merge_characters(primary_character, characters_to_merge):
                 seen.add(key)
 
 
+def deduplicate_characters(epub_id):
+    """
+    Simple character deduplication using string matching.
+    No LLM required - fast and free!
+
+    Returns:
+        Dictionary with deduplication stats
+    """
+    original_count = Character.objects.filter(epub=epub_id).count()
+
+    # Find groups of similar names
+    groups = find_character_name_variations(epub_id)
+
+    print(f"Found {len(groups)} groups of similar character names:")
+
+    merged_count = 0
+    for group in groups:
+        # Use the longest name as primary (usually the full name)
+        primary = max(group, key=lambda c: len(c.name))
+
+        names = [c.name for c in group]
+        print(f"  Merging: {', '.join(names)} → {primary.name}")
+
+        # Merge the group
+        merge_characters(primary, group)
+        merged_count += 1
+
+    final_count = Character.objects.filter(epub=epub_id).count()
+
+    stats = {
+        'original_count': original_count,
+        'merged_groups': merged_count,
+        'final_count': final_count,
+        'reduction': original_count - final_count
+    }
+
+    print(f"\n{'=' * 50}")
+    print(f"Deduplication complete!")
+    print(f"Original characters: {stats['original_count']}")
+    print(f"Merged groups: {stats['merged_groups']}")
+    print(f"Final character count: {stats['final_count']}")
+    print(f"Reduction: {stats['reduction']} ({(stats['reduction'] / original_count * 100):.1f}%)")
+
+    return stats
+
+
 def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size: int = 10):
     """
     Extract relationships from an EPUB using LLM analysis on chunked text.
