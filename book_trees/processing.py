@@ -530,6 +530,54 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
     return relationships_found
 
 
+def process_book_complete(epub_id, api_key):
+    """
+    Complete book processing pipeline with deduplication.
+
+    Args:
+        epub_id: ID of the EpubFile to process
+        api_key: Google API key for LLM analysis
+
+    Returns:
+        Dictionary with processing stats
+    """
+    print(f"{'=' * 50}")
+    print(f"Processing EPUB ID: {epub_id}")
+    print(f"{'=' * 50}\n")
+
+    # Step 1: Extract chapters
+    print("Step 1: Extracting chapters...")
+    process_epub_file(epub_id)
+    print("✓ Chapters extracted\n")
+
+    # Step 2: Extract characters with context
+    print("Step 2: Extracting characters...")
+    char_count = extract_characters_with_chunks(epub_id)
+    print(f"✓ Found {char_count} character variations\n")
+
+    # Step 3: Deduplicate characters
+    print("Step 3: Deduplicating characters...")
+    dedup_stats = deduplicate_characters(epub_id)
+    print()
+
+    # Step 4: Extract relationships
+    print("Step 4: Extracting relationships with LLM...")
+    rel_count = extract_relationships_with_llm(epub_id, api_key)
+    print(f"✓ Found {rel_count} relationships\n")
+
+    print(f"{'=' * 50}")
+    print("✓ Book processing complete!")
+    print(f"{'=' * 50}")
+
+    return {
+        'chapters': Chapter.objects.filter(epub_id=epub_id).count(),
+        'original_characters': dedup_stats['original_count'],
+        'final_characters': dedup_stats['final_count'],
+        'character_reduction': dedup_stats['reduction'],
+        'relationships': rel_count
+    }
+
+
 def extract_characters_simple(epub_id):
     """
     LEGACY FUNCTION
