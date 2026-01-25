@@ -1,8 +1,14 @@
 import os
 import django
+from dotenv import load_dotenv
+from django.conf import settings
+
+load_dotenv()
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'book_tree.settings')
 django.setup()
+
+API_KEY = settings.GOOGLE_API_KEY
 
 from book_trees.processing import extract_chapters_from_epub, extract_characters_with_chunks, analyze_chunk_with_llm
 
@@ -41,12 +47,6 @@ from book_trees.processing import extract_chapters_from_epub, extract_characters
 #   'confidence': 0.6, 'evidence': 'Rachel stood there, with the baby in her arms and Sarah tucked in close to her side. “You are teaching today with your hair pinned?”',
 #   'chapter_number': 10}]
 
-import os
-import django
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'book_tree.settings')
-django.setup()
-
 from book_trees.processing import (
     extract_characters_with_chunks,
     find_character_name_variations,
@@ -54,8 +54,6 @@ from book_trees.processing import (
     analyze_chunk_with_llm
 )
 from book_trees.models import Character
-
-API_KEY = 
 
 def test_deduplication(epub_id):
     """Test how much deduplication reduces character count"""

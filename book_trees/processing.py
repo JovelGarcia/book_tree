@@ -3,6 +3,7 @@ import re
 import spacy
 import json
 import requests
+from difflib import SequenceMatcher
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from django.db import transaction
@@ -35,7 +36,6 @@ def extract_chapters_from_epub(epub_path):
     return chapters
 
 def process_epub_file(epub_id):
-
     epub = None
     try:
         epub = EpubFile.objects.get(id=epub_id)
@@ -48,10 +48,10 @@ def process_epub_file(epub_id):
 
         for chapter_data in chapters_data:
             Chapter.objects.create(
-                epub = epub,
+                epub=epub,
                 title=chapter_data['title'],
-                content = chapter_data['content'],
-                chapter_number = chapter_data['chapter_number']
+                content=chapter_data['content'],
+                chapter_number=chapter_data['chapter_number']
 
             )
 
@@ -107,6 +107,20 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
 
                     # skip single letters, common false positive
                     if len(name) <= 1:
+                        continue
+
+                    # Skip if the entity contains verbs (using spaCy's POS tagging)
+                    # This filters out phrases like "Tara hesitates" or "John said"
+                    entity_doc = nlp(ent.text)
+                    has_verb = any(token.pos_ == 'VERB' for token in entity_doc)
+                    if has_verb:
+                        continue
+
+                    # Skip if mostly lowercase (likely not a proper name)
+                    # e.g., "the king" vs "King Arthur"
+                    words = name.split()
+                    capitalized_words = sum(1 for w in words if w and w[0].isupper())
+                    if len(words) > 1 and capitalized_words / len(words) < 0.5:
                         continue
 
                     entities_in_sentence.append(name)
@@ -330,7 +344,6 @@ Instructions:
         print(f"Unexpected error in LLM analysis: {e}")
         return []
 
-
 def merge_characters(primary_character, characters_to_merge):
     """
     Merge multiple character records into one primary character.
@@ -483,7 +496,6 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
             relationships = analyze_chunk_with_llm(chunk_with_chapter, api_key)
             all_relationships.extend(relationships)
 
-
     with transaction.atomic():
         for rel_data in all_relationships:
             try:
@@ -508,9 +520,7 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
                     'confidence': rel_data.get('confidence')
                 }
 
-                rel.evidence.append(evidence_entry)
-
-
+                # Check if evidence already exists before adding
                 if evidence_entry not in rel.evidence:
                     rel.evidence.append(evidence_entry)
 
@@ -578,11 +588,15 @@ def process_book_complete(epub_id, api_key):
     }
 
 
+# ============================================================================
+# LEGACY FUNCTIONS (kept for backwards compatibility)
+# ============================================================================
+
 def extract_characters_simple(epub_id):
     """
     LEGACY FUNCTION
 
-    Extracts character names from EPUBn using spaCy NER
+    Extracts character names from EPUB using spaCy NER
 
     Args:
         epub_id: ID of the EpubFile to process
@@ -596,7 +610,6 @@ def extract_characters_simple(epub_id):
     character_counts = {}
     first_appearance = {}
 
-
     for chapter in chapters:
         doc = nlp(chapter.content)
         annotated_sentences = []
@@ -609,7 +622,7 @@ def extract_characters_simple(epub_id):
                     name = ent.text.strip()
                     name = name.rstrip("'s")
 
-                    #skip single letters, common false positive
+                    # skip single letters, common false positive
                     if len(name) <= 1:
                         continue
 
@@ -631,16 +644,15 @@ def extract_characters_simple(epub_id):
 
     for name, count in character_counts.items():
         Character.objects.update_or_create(
-            epub = epub,
-            name = name,
-            defaults = {
+            epub=epub,
+            name=name,
+            defaults={
                 'mention_count': count,
                 'first_appearance_chapter': first_appearance[name]
             }
         )
 
     return len(character_counts)
-
 
 
 def extract_relationships_simple(epub_id):
@@ -667,7 +679,7 @@ def extract_relationships_simple(epub_id):
             characters = sentence_data['characters']
             text = sentence_data['text']
 
-            if len(characters)  >= 2:
+            if len(characters) >= 2:
                 for relationship_type, keywords in relationship_keywords.items():
                     for keyword in keywords:
 
@@ -702,18 +714,10 @@ def extract_relationships_simple(epub_id):
                             if new_evidence not in rel.evidence:
                                 rel.evidence.append(new_evidence)
 
-                                rel.confidence=min(0.95, 0.7 + len(rel.evidence) * 0.05)
+                                rel.confidence = min(0.95, 0.7 + len(rel.evidence) * 0.05)
                                 rel.save()
 
                             relationships_found += 1
                             break
 
     return relationships_found
-
-
-
-
-
-
-
-
