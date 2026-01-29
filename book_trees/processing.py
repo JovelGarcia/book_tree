@@ -173,72 +173,6 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
     return len(character_counts)
 
 
-def find_character_name_variations(epub_id):
-    """
-    Find character name variations that should be merged.
-    Uses multiple strategies:
-    1. Substring matching (e.g., "Harry" in "Harry Potter")
-    2. String similarity (e.g., "Jon" vs "John")
-    3. Common patterns (e.g., "Mr. Smith" vs "Smith")
-
-    Returns:
-        List of character groups that should be merged
-    """
-    characters = Character.objects.filter(epub=epub_id).order_by('-mention_count')
-
-    # Build similarity groups
-    groups = []
-    used = set()
-
-    for i, char1 in enumerate(characters):
-        if char1.id in used:
-            continue
-
-        group = [char1]
-        name1 = char1.name.lower().strip()
-
-        for char2 in characters[i + 1:]:
-            if char2.id in used:
-                continue
-
-            name2 = char2.name.lower().strip()
-
-            # Strategy 1: Substring matching
-            if name1 in name2 or name2 in name1:
-                # Only merge if length difference isn't too large
-                if max(len(name1), len(name2)) / min(len(name1), len(name2)) <= 2:
-                    group.append(char2)
-                    used.add(char2.id)
-                    continue
-
-            # Strategy 2: String similarity (for typos, abbreviations)
-            similarity = SequenceMatcher(None, name1, name2).ratio()
-            if similarity >= 0.85:  # Very similar
-                group.append(char2)
-                used.add(char2.id)
-                continue
-
-            # Strategy 3: First/last name matching
-            parts1 = name1.split()
-            parts2 = name2.split()
-
-            # Check if they share a significant name part
-            for part1 in parts1:
-                if len(part1) >= 3:  # Skip titles like "Mr"
-                    for part2 in parts2:
-                        if part1 == part2 and len(part1) >= 4:
-                            group.append(char2)
-                            used.add(char2.id)
-                            break
-
-        if len(group) > 1:
-            groups.append(group)
-
-        used.add(char1.id)
-
-    return groups
-
-
 def analyze_chunk_with_llm(chunk_data: Dict[str, Any], api_key: str = None) -> List[Dict]:
     """
     Sends a curated chunk with multiple characters to Gemini 2.5 Flash-Lite for relationship analysis.
@@ -345,16 +279,270 @@ Instructions:
         return []
 
 def merge_characters(primary_character, characters_to_merge):
+
+def validate_and_deduplicate_characters_with_llm(epub_id: int, api_key: str = None) -> Dict[str, Any]:
     """
-    Merge multiple character records into one primary character.
+    Use LLM to validate character names and identify duplicates/variations.
+
+    This replaces the old find_character_name_variations, merge_characters, and deduplicate_characters functions.
+
+    Args:
+        epub_id: ID of the EpubFile to process
+        api_key: Google API Key for Gemini
+
+    Returns:
+        Dictionary with validation stats including:
+            - original_count: Number of character names before validation
+            - invalid_names: List of names that were removed (not real characters)
+            - merged_groups: List of groups that were merged
+            - final_count: Number of unique characters after processing
+            - reduction: Number of duplicates removed
+    """
+    epub = EpubFile.objects.get(id=epub_id)
+    original_characters = list(Character.objects.filter(epub=epub_id).order_by('-mention_count'))
+    original_count = len(original_characters)
+
+    if original_count == 0:
+        return {
+            'original_count': 0,
+            'invalid_names': [],
+            'merged_groups': [],
+            'final_count': 0,
+            'reduction': 0
+        }
+
+    # Extract just the names and their mention counts for the LLM
+    character_data = [
+        {
+            'name': char.name,
+            'mention_count': char.mention_count,
+            'first_appearance': char.first_appearance_chapter
+        }
+        for char in original_characters
+    ]
+
+    # Prepare the prompt for the LLM
+    prompt = f"""You are analyzing character names extracted from a book using NER (Named Entity Recognition). 
+Some extracted names may not be real characters (e.g., places, titles, errors), and some may be variations of the same character.
+
+Here is the list of extracted names with their mention counts:
+{json.dumps(character_data, indent=2)}
+
+Your task:
+1. Identify which names are NOT real characters (e.g., place names, titles, common nouns, errors)
+2. Group together names that refer to the same character (e.g., "Harry", "Harry Potter", "Potter")
+3. For each group, select the CANONICAL name (usually the most complete/formal version)
+
+Return JSON in this EXACT format:
+{{
+    "invalid_names": ["Name1", "Name2"],
+    "character_groups": [
+        {{
+            "canonical_name": "Harry Potter",
+            "variations": ["Harry", "Potter", "Harry James Potter"],
+            "reasoning": "All refer to the protagonist"
+        }},
+        {{
+            "canonical_name": "Hermione Granger",
+            "variations": ["Hermione", "Granger"],
+            "reasoning": "All refer to the same character"
+        }}
+    ]
+}}
+
+Guidelines:
+- Only mark names as invalid if you're confident they're not characters
+- Only group names if they CLEARLY refer to the same person
+- The canonical_name should be one of the variations in the list
+- Don't include the canonical_name in the variations list
+- When in doubt, keep names separate
+- Return ONLY valid JSON, no other text
+"""
+
+    try:
+        # Call Gemini API
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}",
+            headers={
+                "Content-Type": "application/json",
+            },
+            json={
+                "contents": [{
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }],
+                "generationConfig": {
+                    "temperature": 0.2,  # Lower temperature for more consistent analysis
+                    "maxOutputTokens": 4096,
+                    "responseMimeType": "application/json"
+                }
+            },
+            timeout=60
+        )
+
+        response.raise_for_status()
+        result = response.json()
+
+        # Extract the response
+        if 'candidates' in result and len(result['candidates']) > 0:
+            content = result['candidates'][0]['content']['parts'][0]['text'].strip()
+        else:
+            print(f"Unexpected Gemini response format: {result}")
+            return {
+                'original_count': original_count,
+                'invalid_names': [],
+                'merged_groups': [],
+                'final_count': original_count,
+                'reduction': 0,
+                'error': 'Unexpected API response format'
+            }
+
+        # Parse the JSON response
+        validation_data = json.loads(content)
+        invalid_names = validation_data.get('invalid_names', [])
+        character_groups = validation_data.get('character_groups', [])
+
+        print(f"\n{'=' * 60}")
+        print("LLM Character Validation Results")
+        print(f"{'=' * 60}\n")
+
+        # Step 1: Remove invalid names
+        removed_count = 0
+        if invalid_names:
+            print(f"Removing {len(invalid_names)} invalid names:")
+            for name in invalid_names:
+                print(f"  ✗ {name}")
+                Character.objects.filter(epub=epub_id, name=name).delete()
+                removed_count += 1
+            print()
+
+        # Step 2: Merge character groups
+        merged_count = 0
+        merged_groups_info = []
+
+        if character_groups:
+            print(f"Merging {len(character_groups)} character groups:\n")
+
+            with transaction.atomic():
+                for group in character_groups:
+                    canonical = group['canonical_name']
+                    variations = group['variations']
+                    reasoning = group.get('reasoning', '')
+
+                    # Find the canonical character
+                    try:
+                        primary_char = Character.objects.get(epub=epub_id, name=canonical)
+                    except Character.DoesNotExist:
+                        print(f"  ⚠ Warning: Canonical name '{canonical}' not found, skipping group")
+                        continue
+
+                    # Find all variation characters
+                    variation_chars = []
+                    for var_name in variations:
+                        try:
+                            var_char = Character.objects.get(epub=epub_id, name=var_name)
+                            if var_char.id != primary_char.id:
+                                variation_chars.append(var_char)
+                        except Character.DoesNotExist:
+                            continue
+
+                    if not variation_chars:
+                        continue
+
+                    # Print merge info
+                    all_names = [canonical] + variations
+                    print(f"  Merging: {', '.join(all_names)}")
+                    print(f"    → {canonical}")
+                    if reasoning:
+                        print(f"    Reason: {reasoning}")
+                    print()
+
+                    # Merge the characters
+                    merge_characters_internal(primary_char, variation_chars)
+                    merged_count += 1
+
+                    merged_groups_info.append({
+                        'canonical': canonical,
+                        'variations': variations,
+                        'reasoning': reasoning
+                    })
+
+        # Final stats
+        final_count = Character.objects.filter(epub=epub_id).count()
+        total_reduction = original_count - final_count
+
+        stats = {
+            'original_count': original_count,
+            'invalid_names': invalid_names,
+            'invalid_count': removed_count,
+            'merged_groups': merged_groups_info,
+            'merged_count': merged_count,
+            'final_count': final_count,
+            'reduction': total_reduction
+        }
+
+        print(f"{'=' * 60}")
+        print("Validation Complete!")
+        print(f"{'=' * 60}")
+        print(f"Original characters: {original_count}")
+        print(f"Invalid names removed: {removed_count}")
+        print(f"Character groups merged: {merged_count}")
+        print(f"Final character count: {final_count}")
+        print(f"Total reduction: {total_reduction} ({(total_reduction / original_count * 100):.1f}%)")
+        print(f"{'=' * 60}\n")
+
+        return stats
+
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response content: {e.response.text}")
+        return {
+            'original_count': original_count,
+            'invalid_names': [],
+            'merged_groups': [],
+            'final_count': original_count,
+            'reduction': 0,
+            'error': str(e)
+        }
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse JSON response: {e}")
+        print(f"Response content: {content}")
+        return {
+            'original_count': original_count,
+            'invalid_names': [],
+            'merged_groups': [],
+            'final_count': original_count,
+            'reduction': 0,
+            'error': f'JSON parse error: {str(e)}'
+        }
+    except Exception as e:
+        print(f"Unexpected error in character validation: {e}")
+        return {
+            'original_count': original_count,
+            'invalid_names': [],
+            'merged_groups': [],
+            'final_count': original_count,
+            'reduction': 0,
+            'error': str(e)
+        }
+
+
+def merge_characters_internal(primary_character, characters_to_merge):
+    """
+    Internal helper to merge multiple character records into one primary character.
     Updates all relationships and annotations.
+
+    Args:
+        primary_character: The Character object to keep
+        characters_to_merge: List of Character objects to merge into primary
     """
     with transaction.atomic():
         # Combine mention counts
         total_mentions = primary_character.mention_count
         for char in characters_to_merge:
-            if char.id != primary_character.id:
-                total_mentions += char.mention_count
+            total_mentions += char.mention_count
 
         primary_character.mention_count = total_mentions
 
@@ -364,16 +552,13 @@ def merge_characters(primary_character, characters_to_merge):
                 primary_character.aliases = []
 
             for char in characters_to_merge:
-                if char.id != primary_character.id and char.name not in primary_character.aliases:
+                if char.name not in primary_character.aliases:
                     primary_character.aliases.append(char.name)
 
         primary_character.save()
 
         # Update all relationships
         for char in characters_to_merge:
-            if char.id == primary_character.id:
-                continue
-
             # Update relationships where this character is character_1
             Relationship.objects.filter(character_1=char).update(character_1=primary_character)
 
@@ -413,52 +598,6 @@ def merge_characters(primary_character, characters_to_merge):
                     rel.delete()
             else:
                 seen.add(key)
-
-
-def deduplicate_characters(epub_id):
-    """
-    Simple character deduplication using string matching.
-    No LLM required - fast and free!
-
-    Returns:
-        Dictionary with deduplication stats
-    """
-    original_count = Character.objects.filter(epub=epub_id).count()
-
-    # Find groups of similar names
-    groups = find_character_name_variations(epub_id)
-
-    print(f"Found {len(groups)} groups of similar character names:")
-
-    merged_count = 0
-    for group in groups:
-        # Use the longest name as primary (usually the full name)
-        primary = max(group, key=lambda c: len(c.name))
-
-        names = [c.name for c in group]
-        print(f"  Merging: {', '.join(names)} → {primary.name}")
-
-        # Merge the group
-        merge_characters(primary, group)
-        merged_count += 1
-
-    final_count = Character.objects.filter(epub=epub_id).count()
-
-    stats = {
-        'original_count': original_count,
-        'merged_groups': merged_count,
-        'final_count': final_count,
-        'reduction': original_count - final_count
-    }
-
-    print(f"\n{'=' * 50}")
-    print(f"Deduplication complete!")
-    print(f"Original characters: {stats['original_count']}")
-    print(f"Merged groups: {stats['merged_groups']}")
-    print(f"Final character count: {stats['final_count']}")
-    print(f"Reduction: {stats['reduction']} ({(stats['reduction'] / original_count * 100):.1f}%)")
-
-    return stats
 
 
 def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size: int = 10):
@@ -542,7 +681,7 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
 
 def process_book_complete(epub_id, api_key):
     """
-    Complete book processing pipeline with deduplication.
+    Complete book processing pipeline with LLM-based character validation.
 
     Args:
         epub_id: ID of the EpubFile to process
@@ -561,14 +700,13 @@ def process_book_complete(epub_id, api_key):
     print("✓ Chapters extracted\n")
 
     # Step 2: Extract characters with context
-    print("Step 2: Extracting characters...")
+    print("Step 2: Extracting characters with NER...")
     char_count = extract_characters_with_chunks(epub_id)
-    print(f"✓ Found {char_count} character variations\n")
+    print(f"✓ Found {char_count} potential character names\n")
 
-    # Step 3: Deduplicate characters
-    print("Step 3: Deduplicating characters...")
-    dedup_stats = deduplicate_characters(epub_id)
-    print()
+    # Step 3: Validate and deduplicate characters with LLM
+    print("Step 3: Validating and deduplicating characters with LLM...")
+    validation_stats = validate_and_deduplicate_characters_with_llm(epub_id, api_key)
 
     # Step 4: Extract relationships
     print("Step 4: Extracting relationships with LLM...")
@@ -581,9 +719,11 @@ def process_book_complete(epub_id, api_key):
 
     return {
         'chapters': Chapter.objects.filter(epub_id=epub_id).count(),
-        'original_characters': dedup_stats['original_count'],
-        'final_characters': dedup_stats['final_count'],
-        'character_reduction': dedup_stats['reduction'],
+        'original_characters': validation_stats['original_count'],
+        'invalid_removed': validation_stats.get('invalid_count', 0),
+        'groups_merged': validation_stats.get('merged_count', 0),
+        'final_characters': validation_stats['final_count'],
+        'character_reduction': validation_stats['reduction'],
         'relationships': rel_count
     }
 
