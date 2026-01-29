@@ -278,7 +278,6 @@ Instructions:
         print(f"Unexpected error in LLM analysis: {e}")
         return []
 
-def merge_characters(primary_character, characters_to_merge):
 
 def validate_and_deduplicate_characters_with_llm(epub_id: int, api_key: str = None) -> Dict[str, Any]:
     """
@@ -312,14 +311,13 @@ def validate_and_deduplicate_characters_with_llm(epub_id: int, api_key: str = No
         }
 
     # Extract just the names and their mention counts for the LLM
-    character_data = [
-        {
+    character_data = []
+    for char in original_characters:
+        character_data.append({
             'name': char.name,
             'mention_count': char.mention_count,
             'first_appearance': char.first_appearance_chapter
-        }
-        for char in original_characters
-    ]
+        })
 
     # Prepare the prompt for the LLM
     prompt = f"""You are analyzing character names extracted from a book using NER (Named Entity Recognition). 
