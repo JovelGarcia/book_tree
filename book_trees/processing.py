@@ -3,6 +3,7 @@ import re
 import spacy
 import json
 import requests
+import time
 from difflib import SequenceMatcher
 from ebooklib import epub
 from bs4 import BeautifulSoup
@@ -12,6 +13,80 @@ from typing import List, Dict, Any
 
 # load NLP
 nlp = spacy.load("en_core_web_sm")
+
+
+def make_api_request_with_retry(url, headers, json_data, max_retries=5, initial_delay=1):
+    """
+    Make an API request with exponential backoff retry logic.
+
+    Args:
+        url: API endpoint URL
+        headers: Request headers
+        json_data: JSON payload
+        max_retries: Maximum number of retry attempts (default: 5)
+        initial_delay: Initial delay in seconds before first retry (default: 1)
+
+    Returns:
+        Response object if successful
+
+    Raises:
+        requests.exceptions.RequestException: If all retries fail
+    """
+    delay = initial_delay
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=json_data, timeout=30)
+
+            # If successful, return immediately
+            if response.status_code == 200:
+                return response
+
+            # Check if error is retryable
+            if response.status_code in [429, 503, 500, 502, 504]:
+                error_message = f"API request failed with status {response.status_code}"
+
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get('error', {}).get('message', error_message)
+                except:
+                    pass
+
+                if attempt < max_retries - 1:
+                    print(f"⚠ {error_message}. Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    print(f"✗ All {max_retries} retry attempts failed")
+                    response.raise_for_status()
+            else:
+                # Non-retryable error, raise immediately
+                response.raise_for_status()
+
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                print(f"⚠ Request timed out. Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+                delay *= 2
+                continue
+            else:
+                print(f"✗ Request timed out after {max_retries} attempts")
+                raise
+
+        except requests.exceptions.ConnectionError:
+            if attempt < max_retries - 1:
+                print(f"⚠ Connection error. Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+                delay *= 2
+                continue
+            else:
+                print(f"✗ Connection failed after {max_retries} attempts")
+                raise
+
+    # Should never reach here, but just in case
+    raise requests.exceptions.RequestException(f"Failed after {max_retries} attempts")
+
 
 def extract_chapters_from_epub(epub_path):
     """Extract chapters and text from an EPUB file."""
@@ -34,6 +109,7 @@ def extract_chapters_from_epub(epub_path):
                 })
 
     return chapters
+
 
 def process_epub_file(epub_id):
     epub = None
@@ -222,13 +298,11 @@ Instructions:
 """
 
     try:
-        # Call Gemini 2.5 Flash-Lite API
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}",
-            headers={
-                "Content-Type": "application/json",
-            },
-            json={
+        # Call Gemini 2.5 Flash-Lite API with retry logic
+        response = make_api_request_with_retry(
+            url=f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}",
+            headers={"Content-Type": "application/json"},
+            json_data={
                 "contents": [{
                     "parts": [{
                         "text": prompt
@@ -239,11 +313,8 @@ Instructions:
                     "maxOutputTokens": 2048,
                     "responseMimeType": "application/json"  # Forces JSON output
                 }
-            },
-            timeout=30
+            }
         )
-
-        response.raise_for_status()
 
         # Extract the response
         result = response.json()
@@ -358,13 +429,11 @@ Guidelines:
 """
 
     try:
-        # Call Gemini API
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}",
-            headers={
-                "Content-Type": "application/json",
-            },
-            json={
+        # Call Gemini API with retry logic
+        response = make_api_request_with_retry(
+            url=f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}",
+            headers={"Content-Type": "application/json"},
+            json_data={
                 "contents": [{
                     "parts": [{
                         "text": prompt
@@ -376,10 +445,9 @@ Guidelines:
                     "responseMimeType": "application/json"
                 }
             },
-            timeout=60
+            max_retries=5
         )
 
-        response.raise_for_status()
         result = response.json()
 
         # Extract the response

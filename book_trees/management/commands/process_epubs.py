@@ -3,24 +3,24 @@ Management command to process EPUB files with various processing options
 
 Usage:
     # Full processing pipeline (chapters + characters + validation + relationships)
-    python manage.py process_epubs --full --api-key YOUR_API_KEY
+    python3 manage.py process_epubs --full --api-key YOUR_API_KEY
 
     # Process specific EPUB with full pipeline
-    python manage.py process_epubs --epub-id 5 --full --api-key YOUR_API_KEY
+    python3 manage.py process_epubs --epub-id 5 --full --api-key YOUR_API_KEY
 
     # Individual processing steps
-    python manage.py process_epubs --chapters-only
-    python manage.py process_epubs --characters-only
-    python manage.py process_epubs --validate-characters --api-key YOUR_API_KEY
-    python manage.py process_epubs --relationships-only --api-key YOUR_API_KEY
+    python3 manage.py process_epubs --chapters-only
+    python3 manage.py process_epubs --characters-only
+    python3 manage.py process_epubs --validate-characters --api-key YOUR_API_KEY
+    python3 manage.py process_epubs --relationships-only --api-key YOUR_API_KEY
 
     # Reprocess all EPUBs
-    python manage.py process_epubs --reprocess --full --api-key YOUR_API_KEY
+    python3 manage.py process_epubs --reprocess --full --api-key YOUR_API_KEY
 """
 
 from django.core.management.base import BaseCommand
 from django.conf import settings
-from book_trees.models import EpubFile
+from book_trees.models import EpubFile, Character, Chapter, Relationship
 from book_trees.processing import (
     process_epub_file,
     extract_characters_with_chunks,
@@ -126,9 +126,9 @@ class Command(BaseCommand):
             try:
                 # Clean up for reprocessing
                 if reprocess:
-                    epub.relationships.all().delete()
-                    epub.characters.all().delete()
-                    epub.chapters.all().delete()
+                    Relationship.objects.filter(epub=epub).delete()
+                    Character.objects.filter(epub=epub).delete()
+                    Chapter.objects.filter(epub=epub).delete()
                     epub.status = 'p'
                     epub.save()
 
