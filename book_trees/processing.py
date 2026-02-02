@@ -12,8 +12,165 @@ from .models import EpubFile, Chapter, Character, Relationship
 from typing import List, Dict, Any
 
 # load NLP
-nlp = spacy.load("en_core_web_sm")
+nlp = spacy.load("en_core_web_lg")
 
+# ============================================================================
+# PRE-FILTERING: Remove obvious non-characters before LLM processing
+# ============================================================================
+
+# Hard-coded list of first-person narrative markers and pronouns
+NARRATOR_MARKERS = {
+    'I', 'Me', 'My', 'Mine', 'Myself',
+    'We', 'Us', 'Our', 'Ours', 'Ourselves',
+    'You', 'Your', 'Yours', 'Yourself', 'Yourselves',
+    'He', 'Him', 'His', 'She', 'Her', 'Hers',
+    'They', 'Them', 'Their', 'Theirs'
+}
+  
+# Common generic descriptors that spaCy tags as PERSON
+GENERIC_DESCRIPTORS = {
+    'man', 'woman', 'boy', 'girl', 'child', 'person', 'people',
+    'warrior', 'warriors', 'soldier', 'soldiers', 'guard', 'guards',
+    'servant', 'servants', 'lord', 'lady', 'king', 'queen',
+    'prince', 'princess', 'knight', 'knights', 'merchant', 'merchants',
+    'priest', 'priestess', 'mage', 'wizard', 'sorcerer',
+    'stranger', 'strangers', 'traveler', 'travelers',
+    'father', 'mother', 'brother', 'sister', 'son', 'daughter',
+    'husband', 'wife', 'friend', 'friends', 'enemy', 'enemies'
+}
+
+# Emotion/state words that get tagged as PERSON
+EMOTION_ACTION_WORDS = {
+    'Annoyed', 'Calm', 'Frown', 'Smile', 'Laugh', 'Cry', 'Sigh',
+    'Nod', 'Shake', 'Shrug', 'Grin', 'Scowl', 'Wince', 'Gasp',
+    'Surprised', 'Confused', 'Worried', 'Afraid', 'Angry', 'Happy',
+    'Sad', 'Excited', 'Nervous', 'Relieved', 'Shocked', 'Stunned'
+}
+
+
+def is_roman_numeral(text: str) -> bool:
+    """Check if text is a Roman numeral (I, II, III, IV, V, etc.)"""
+    if not text:
+        return False
+    # Roman numerals only contain these characters
+    roman_pattern = r'^[IVXLCDM]+$'
+    return bool(re.match(roman_pattern, text.upper()))
+
+
+def is_likely_character(name: str, entity_tokens=None, context_text: str = "") -> bool:
+    """
+    Conservative pre-filter to remove obvious non-characters.
+
+    Returns True if the name should be KEPT (likely a real character).
+    Returns False if the name should be FILTERED OUT (obvious junk).
+
+    Args:
+        name: The extracted entity text
+        entity_tokens: spaCy tokens from the entity (for POS tags)
+        context_text: Surrounding text for additional context
+
+    Filters OUT (returns False):
+    1. Single characters (but "I" is already handled by NARRATOR_MARKERS)
+    2. Pronouns and first-person narrative markers
+    3. Emotion/action words tagged as PERSON
+    4. Roman numerals and formatting artifacts
+    5. Generic descriptors without proper names
+    6. All-lowercase words (not proper names)
+    7. Phrases with articles ("the man with the scar")
+
+    Keeps (returns True):
+    * Unusual fantasy names (Caeror, Ahmose al Maq, Ka, Re)
+    * Titles + names (King Rónán)
+    * Names with apostrophes (D'Artagnan, O'Brien)
+    * Short but capitalized names (Vis, Tash, Bo)
+    """
+
+    # Filter 1: Single characters (except keep 2+ chars for fantasy names)
+    if len(name) == 1:
+        return False
+
+    # Filter 2: Pronouns and narrator markers (case-insensitive check)
+    if name in NARRATOR_MARKERS or name.title() in NARRATOR_MARKERS:
+        return False
+
+    # Filter 3: Emotion/action words
+    if name in EMOTION_ACTION_WORDS or name.title() in EMOTION_ACTION_WORDS:
+        return False
+
+    # Filter 4: Roman numerals
+    if is_roman_numeral(name):
+        return False
+
+    # Filter 5: Formatting artifacts - things like "XXXV\nSWEAT" or excessive punctuation
+    if '\n' in name or '\t' in name or '\r' in name:
+        return False
+
+    # Count special characters (excluding apostrophes, hyphens, spaces which are valid in names)
+    special_char_count = sum(1 for c in name if not c.isalnum() and c not in "'-. ")
+    if special_char_count > 2:  # Allow some special chars for fantasy names
+        return False
+
+    # Filter 6: All-lowercase words (not proper names)
+    # But allow if it's part of a multi-word phrase where other words are capitalized
+    words = name.split()
+    if len(words) == 1 and name.islower():
+        return False
+
+    # For multi-word names, check if it's mostly lowercase (likely not a proper name)
+    if len(words) > 1:
+        capitalized_count = sum(1 for w in words if w and w[0].isupper())
+        # If less than half the words are capitalized, probably not a name
+        if capitalized_count / len(words) < 0.5:
+            return False
+
+    # Filter 7: Generic descriptors without proper names
+    # Check if the name is JUST a generic descriptor
+    name_lower = name.lower()
+    words_lower = [w.lower() for w in words]
+
+    # If it's a single word and it's a generic descriptor, filter it
+    if len(words) == 1 and name_lower in GENERIC_DESCRIPTORS:
+        return False
+
+    # If it's multiple words and they're ALL generic descriptors, filter it
+    if len(words) > 1 and all(w in GENERIC_DESCRIPTORS for w in words_lower):
+        return False
+
+    # Filter 8: Phrases with articles ("the man", "a warrior", etc.)
+    articles = {'the', 'a', 'an'}
+    if len(words) > 1 and words_lower[0] in articles:
+        return False
+
+    # Filter 9: Check POS tags if available
+    if entity_tokens:
+        # If the entity is tagged as a verb or adjective, it's likely not a character
+        pos_tags = [token.pos_ for token in entity_tokens]
+
+        # If it's predominantly verbs or adjectives, filter it
+        verb_adj_count = sum(1 for pos in pos_tags if pos in ['VERB', 'ADJ'])
+        if verb_adj_count > len(pos_tags) / 2:
+            return False
+
+        # If it contains common verbs that get misidentified
+        verb_lemmas = [token.lemma_.lower() for token in entity_tokens if token.pos_ == 'VERB']
+        common_verb_lemmas = {'say', 'tell', 'ask', 'reply', 'answer', 'shout', 'whisper', 'think'}
+        if any(lemma in common_verb_lemmas for lemma in verb_lemmas):
+            return False
+
+    # Filter 10: Numbers and dates (sometimes tagged as PERSON)
+    if any(char.isdigit() for char in name):
+        # But allow names like "Unit 731" or "Section 9" if they're proper names
+        # Simple heuristic: if it's ONLY numbers, filter it
+        if name.replace(' ', '').replace('-', '').isdigit():
+            return False
+
+    # If we've made it through all filters, keep it
+    return True
+
+
+# ============================================================================
+# CORE PROCESSING FUNCTIONS
+# ============================================================================
 
 def make_api_request_with_retry(url, headers, json_data, max_retries=5, initial_delay=1):
     """
@@ -149,21 +306,28 @@ def process_epub_file(epub_id):
 
 def extract_characters_with_chunks(epub_id, context_sentences=2):
     """
-    Extracts character names from EPUB using spaCy NER and creates chunks with context
-    Avoids overlapping chunks by advancing past the context window
+    Extracts character names from EPUB using spaCy NER with pre-filtering and creates chunks with context.
+    Avoids overlapping chunks by advancing past the context window.
 
     Args:
         epub_id: ID of the EpubFile to process
         context_sentences: Number of sentences before/after to include in chunk
 
     Returns:
-        Number of unique characters found
+        Dictionary with stats:
+            - raw_entities: Number of entities before filtering
+            - filtered_out: Number of entities removed by pre-filtering
+            - unique_characters: Number of unique characters after filtering
     """
     epub = EpubFile.objects.get(id=epub_id)
     chapters = epub.chapters.all()
 
     character_counts = {}
     first_appearance = {}
+
+    # Stats tracking
+    raw_entity_count = 0
+    filtered_entity_count = 0
 
     for chapter in chapters:
         doc = nlp(chapter.content)
@@ -178,25 +342,36 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
 
             for ent in sent.ents:
                 if ent.label_ == 'PERSON':
+                    raw_entity_count += 1
+
                     name = ent.text.strip()
                     name = name.rstrip("'s")
 
-                    # skip single letters, common false positive
-                    if len(name) <= 1:
+                    # PRE-FILTERING: Apply conservative filters
+                    # Get the spaCy tokens for this entity for POS tag analysis
+                    entity_doc = nlp(ent.text)
+
+                    # Get context for filtering (the sentence text)
+                    context = sent.text.strip()
+
+                    # Apply the pre-filter
+                    if not is_likely_character(name, entity_doc, context):
+                        filtered_entity_count += 1
                         continue
 
-                    # Skip if the entity contains verbs (using spaCy's POS tagging)
-                    # This filters out phrases like "Tara hesitates" or "John said"
-                    entity_doc = nlp(ent.text)
+                    # Additional existing filter: Skip if the entity contains verbs
+                    # (This is now also part of is_likely_character, but kept for backwards compatibility)
                     has_verb = any(token.pos_ == 'VERB' for token in entity_doc)
                     if has_verb:
+                        filtered_entity_count += 1
                         continue
 
                     # Skip if mostly lowercase (likely not a proper name)
-                    # e.g., "the king" vs "King Arthur"
+                    # (This is now also part of is_likely_character, but kept for backwards compatibility)
                     words = name.split()
                     capitalized_words = sum(1 for w in words if w and w[0].isupper())
                     if len(words) > 1 and capitalized_words / len(words) < 0.5:
+                        filtered_entity_count += 1
                         continue
 
                     entities_in_sentence.append(name)
@@ -218,7 +393,11 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
                     for ent in context_sent.ents:
                         if ent.label_ == 'PERSON':
                             char_name = ent.text.strip().rstrip("'s")
-                            if len(char_name) > 1:
+                            entity_doc = nlp(ent.text)
+                            context = context_sent.text.strip()
+
+                            # Apply pre-filter to context characters too
+                            if is_likely_character(char_name, entity_doc, context) and len(char_name) > 1:
                                 all_characters_in_context.add(char_name)
 
                 annotated_chunks.append({
@@ -246,7 +425,23 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
             }
         )
 
-    return len(character_counts)
+    # Print filtering stats
+    unique_chars = len(character_counts)
+    print(f"\n{'=' * 60}")
+    print("Pre-filtering Statistics")
+    print(f"{'=' * 60}")
+    print(f"Raw PERSON entities found: {raw_entity_count}")
+    print(f"Filtered out as non-characters: {filtered_entity_count}")
+    print(f"Unique characters kept: {unique_chars}")
+    if raw_entity_count > 0:
+        print(f"Reduction: {(filtered_entity_count / raw_entity_count * 100):.1f}%")
+    print(f"{'=' * 60}\n")
+
+    return {
+        'raw_entities': raw_entity_count,
+        'filtered_out': filtered_entity_count,
+        'unique_characters': unique_chars
+    }
 
 
 def analyze_chunk_with_llm(chunk_data: Dict[str, Any], api_key: str = None) -> List[Dict]:
@@ -747,7 +942,7 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
 
 def process_book_complete(epub_id, api_key):
     """
-    Complete book processing pipeline with LLM-based character validation.
+    Complete book processing pipeline with pre-filtering and LLM-based character validation.
 
     Args:
         epub_id: ID of the EpubFile to process
@@ -765,10 +960,10 @@ def process_book_complete(epub_id, api_key):
     process_epub_file(epub_id)
     print("✓ Chapters extracted\n")
 
-    # Step 2: Extract characters with context
-    print("Step 2: Extracting characters with NER...")
-    char_count = extract_characters_with_chunks(epub_id)
-    print(f"✓ Found {char_count} potential character names\n")
+    # Step 2: Extract characters with context and pre-filtering
+    print("Step 2: Extracting characters with NER and pre-filtering...")
+    extraction_stats = extract_characters_with_chunks(epub_id)
+    print(f"✓ Found {extraction_stats['unique_characters']} characters after pre-filtering\n")
 
     # Step 3: Validate and deduplicate characters with LLM
     print("Step 3: Validating and deduplicating characters with LLM...")
@@ -785,11 +980,13 @@ def process_book_complete(epub_id, api_key):
 
     return {
         'chapters': Chapter.objects.filter(epub_id=epub_id).count(),
-        'original_characters': validation_stats['original_count'],
-        'invalid_removed': validation_stats.get('invalid_count', 0),
-        'groups_merged': validation_stats.get('merged_count', 0),
+        'raw_entities': extraction_stats['raw_entities'],
+        'pre_filtered': extraction_stats['filtered_out'],
+        'after_pre_filter': extraction_stats['unique_characters'],
+        'llm_invalid_removed': validation_stats.get('invalid_count', 0),
+        'llm_groups_merged': validation_stats.get('merged_count', 0),
         'final_characters': validation_stats['final_count'],
-        'character_reduction': validation_stats['reduction'],
+        'total_reduction': extraction_stats['raw_entities'] - validation_stats['final_count'],
         'relationships': rel_count
     }
 
