@@ -18,6 +18,10 @@ Usage:
     python3 manage.py process_epubs --reprocess --full --api-key YOUR_API_KEY
 """
 
+import zipfile
+from pathlib import Path
+
+
 from django.core.management.base import BaseCommand
 from django.conf import settings
 from book_trees.models import EpubFile, Character, Chapter, Relationship
@@ -79,6 +83,11 @@ class Command(BaseCommand):
             type=str,
             help='Google API key for LLM-based processing',
         )
+        parser.add_argument(
+            '--view-raw',
+            action='store_true',
+            help='View raw EPUB contents (zip listing + raw XHTML) in terminal',
+        )
 
     def handle(self, *args, **options):
         epub_id = options.get('epub_id')
@@ -113,6 +122,47 @@ class Command(BaseCommand):
             else:
                 epubs = EpubFile.objects.filter(status='p')
                 self.stdout.write(f"Processing {epubs.count()} pending EPUBs...\n")
+
+        # View raw EPUB contents
+        if options.get('view_raw'):
+            if not epub_id:
+                self.stdout.write(self.style.ERROR(
+                    "--view-raw requires --epub-id"
+                ))
+                return
+
+            epub = epubs[0]
+            epub_path = Path(epub.file.path)
+
+            self.stdout.write(self.style.SUCCESS(
+                f"\n📘 Viewing raw EPUB: {epub.original_filename}"
+            ))
+            self.stdout.write(f"Path: {epub_path}\n")
+
+            if not epub_path.exists():
+                self.stdout.write(self.style.ERROR("EPUB file not found on disk"))
+                return
+
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                self.stdout.write("📂 EPUB ZIP contents:\n")
+                for name in zf.namelist():
+                    self.stdout.write(f"  - {name}")
+
+                self.stdout.write("\n📄 XHTML / HTML files:\n")
+
+                for name in zf.namelist():
+                    if name.endswith(('.xhtml', '.html')):
+                        self.stdout.write(self.style.WARNING(f"\n--- {name} ---\n"))
+                        raw = zf.read(name).decode('utf-8', errors='ignore')
+
+                        # Prevent terminal overload
+                        max_chars = 4000
+                        if len(raw) > max_chars:
+                            raw = raw[:max_chars] + "\n\n[...truncated...]"
+
+                        self.stdout.write(raw)
+
+            return  # IMPORTANT: stop further processing
 
         # Process each EPUB
         success_count = 0
