@@ -246,24 +246,136 @@ def make_api_request_with_retry(url, headers, json_data, max_retries=5, initial_
 
 
 def extract_chapters_from_epub(epub_path):
-    """Extract chapters and text from an EPUB file."""
+    """Extract chapters and text from an EPUB file.
+
+    Supports multiple chapter identification methods:
+    - Filename patterns (chapter_01, ch01, etc.)
+    - HTML heading tags (h1, h2, h3)
+    - HTML class attributes (chapter, chapter1, etc.)
+    - HTML id attributes (c01, chapter01, etc.)
+    """
     book = epub.read_epub(epub_path)
     chapters = []
+    seen_chapters = set()  # Track seen chapter numbers
+
+    # Keywords that indicate non-chapter content
+    non_chapter_keywords = [
+        'acknowledgment', 'acknowledgement', 'about', 'author', 'copyright',
+        'dedication', 'foreword', 'preface', 'introduction', 'prologue',
+        'epilogue', 'afterword', 'appendix', 'glossary', 'index', 'contents',
+        'toc', 'cover', 'title', 'half', 'bio', 'also by', 'books by'
+    ]
 
     for item in book.get_items():
         if item.get_type() == ebooklib.ITEM_DOCUMENT:
-            soup = BeautifulSoup(item.get_content(), 'html.parser')
+            content = item.get_content()
+            soup = BeautifulSoup(content, 'html.parser')
             text = soup.get_text("\n", strip=True)
 
-            if "chapter" in item.get_name().lower():
-                match = re.search(r'chapter[_\s-]*(\d+)', item.get_name().lower())
-                chapter_number = int(match.group(1)) if match else None
+            # Skip if content is empty or too short
+            if not text or len(text.strip()) < 50:
+                continue
+
+            chapter_number = None
+            title = item.get_name()
+            filename_lower = item.get_name().lower()
+
+            # Check if this is non-chapter content based on filename
+            is_non_chapter = any(keyword in filename_lower for keyword in non_chapter_keywords)
+
+            # Check if this is non-chapter content based on heading text
+            if not is_non_chapter:
+                headings = soup.find_all(['h1', 'h2', 'h3'])
+                for heading in headings:
+                    heading_text = heading.get_text(strip=True).lower()
+                    if any(keyword in heading_text for keyword in non_chapter_keywords):
+                        is_non_chapter = True
+                        break
+
+            # Skip non-chapter content
+            if is_non_chapter:
+                continue
+
+            # Method 1: Check filename for chapter indicators
+            if "chapter" in filename_lower or "ch" in filename_lower:
+                # Match various filename patterns
+                patterns = [
+                    r'chapter[_\s-]*(\d+)',
+                    r'ch[_\s-]*(\d+)',
+                    r'part0*(\d+)',  # Also match part0006 style
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, filename_lower)
+                    if match:
+                        chapter_number = int(match.group(1))
+                        break
+
+            # Method 2: Check HTML elements for chapter indicators
+            if chapter_number is None:
+                # Look for elements with id attributes first (more reliable)
+                chapter_elements = soup.find_all(['h1', 'h2', 'h3', 'div', 'section'],
+                                                 id=re.compile(r'^c0*\d+$|^chapter0*\d+$', re.I))
+
+                for element in chapter_elements:
+                    id_str = element.get('id', '')
+                    # Match patterns like "c01", "c1", "chapter01" (must be mostly numeric)
+                    id_patterns = [
+                        r'^c0*(\d+)$',  # Exact match: c01, c1, c001
+                        r'^chapter0*(\d+)$',  # Exact match: chapter01, chapter1
+                    ]
+                    for pattern in id_patterns:
+                        id_match = re.search(pattern, id_str, re.I)
+                        if id_match:
+                            chapter_number = int(id_match.group(1))
+                            break
+
+                    if chapter_number is not None:
+                        break
+
+                # Only check class attributes if id didn't work
+                # And be very strict about it
+                if chapter_number is None:
+                    # Only match if the class is EXACTLY "chapter" followed by optional separators and digits
+                    chapter_elements = soup.find_all(['h1', 'h2', 'h3', 'div', 'section'],
+                                                     class_=re.compile(r'^chapter[_\s-]+\d+$', re.I))
+
+                    for element in chapter_elements:
+                        if element.get('class'):
+                            class_str = ' '.join(element.get('class'))
+                            # Only match "chapter-1", "chapter_1", "chapter 1" style
+                            class_match = re.search(r'^chapter[_\s-]+(\d+)$', class_str, re.I)
+                            if class_match:
+                                chapter_number = int(class_match.group(1))
+                                break
+
+                # Method 3: Extract title from heading elements
+                if chapter_number is not None:
+                    heading = soup.find(['h1', 'h2', 'h3'])
+                    if heading:
+                        heading_text = heading.get_text(strip=True)
+                        # Use heading text as title if it's meaningful
+                        if heading_text and len(heading_text) < 100:
+                            title = heading_text
+
+            # Only add if we found a valid chapter number
+            if chapter_number is not None:
+                # Skip duplicates
+                if chapter_number in seen_chapters:
+                    print(f"⚠️  Duplicate chapter {chapter_number} found:")
+                    print(f"   Filename: {item.get_name()}")
+                    print(f"   Title: {title}")
+                    continue
+                seen_chapters.add(chapter_number)
 
                 chapters.append({
                     'chapter_number': chapter_number,
-                    'title': item.get_name(),
-                    'content': text
+                    'title': title,
+                    'content': text,
+                    'filename': item.get_name()
                 })
+
+    # Sort chapters by chapter number
+    chapters.sort(key=lambda x: x['chapter_number'])
 
     return chapters
 
