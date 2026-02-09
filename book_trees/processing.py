@@ -457,7 +457,8 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
                     raw_entity_count += 1
 
                     name = ent.text.strip()
-                    name = name.rstrip("'s")
+                    if name.endswith("'s"):
+                        name = name[:-2]
 
                     # PRE-FILTERING: Apply conservative filters
                     # Get the spaCy tokens for this entity for POS tag analysis
@@ -504,7 +505,8 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
                 for context_sent in context_sents:
                     for ent in context_sent.ents:
                         if ent.label_ == 'PERSON':
-                            char_name = ent.text.strip().rstrip("'s")
+                            if char_name.endswith("'s"):
+                                char_name = char_name[:-2]
                             entity_doc = nlp(ent.text)
                             context = context_sent.text.strip()
 
@@ -1135,7 +1137,8 @@ def extract_characters_simple(epub_id):
             for ent in sent.ents:
                 if ent.label_ == 'PERSON':
                     name = ent.text.strip()
-                    name = name.rstrip("'s")
+                    if name.endswith("'s"):
+                        name = name[:-2]
 
                     # skip single letters, common false positive
                     if len(name) <= 1:
