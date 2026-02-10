@@ -505,8 +505,11 @@ def extract_characters_with_chunks(epub_id, context_sentences=2):
                 for context_sent in context_sents:
                     for ent in context_sent.ents:
                         if ent.label_ == 'PERSON':
+                            char_name = ent.text.strip()
+
                             if char_name.endswith("'s"):
                                 char_name = char_name[:-2]
+
                             entity_doc = nlp(ent.text)
                             context = context_sent.text.strip()
 
