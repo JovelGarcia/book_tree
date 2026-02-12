@@ -1090,6 +1090,10 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
                 char1 = Character.objects.get(epub=epub, name=rel_data['character_1'])
                 char2 = Character.objects.get(epub=epub, name=rel_data['character_2'])
 
+                # Sort characters alphabetically by name
+                if char1.name > char2.name:
+                    char1, char2 = char2, char1
+
                 rel, created = Relationship.objects.get_or_create(
                     epub=epub,
                     character_1=char1,
