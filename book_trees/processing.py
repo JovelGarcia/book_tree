@@ -253,130 +253,201 @@ def extract_chapters_from_epub(epub_path):
     - HTML heading tags (h1, h2, h3)
     - HTML class attributes (chapter, chapter1, etc.)
     - HTML id attributes (c01, chapter01, etc.)
+    - Cross-document sequence validation of standalone numbers near document top
     """
     book = epub.read_epub(epub_path)
     chapters = []
-    seen_chapters = set()  # Track seen chapter numbers
+    seen_chapters = set()
 
-    # Keywords that indicate non-chapter content
     non_chapter_keywords = [
         'acknowledgment', 'acknowledgement', 'about', 'author', 'copyright',
         'dedication', 'foreword', 'preface', 'introduction', 'prologue',
-        'epilogue', 'afterword', 'appendix', 'glossary', 'index', 'contents',
+        'epilogue', 'afterword', 'appendix', 'glossary', 'contents',
         'toc', 'cover', 'title', 'half', 'bio', 'also by', 'books by'
     ]
+    # -------------------------------------------------------------------------
+    # PASS 1: Parse all documents and collect candidates
+    # -------------------------------------------------------------------------
+    candidate_docs = []
 
     for item in book.get_items():
-        if item.get_type() == ebooklib.ITEM_DOCUMENT:
-            content = item.get_content()
-            soup = BeautifulSoup(content, 'html.parser')
-            text = soup.get_text("\n", strip=True)
+        if item.get_type() != ebooklib.ITEM_DOCUMENT:
+            continue
 
-            # Skip if content is empty or too short
-            if not text or len(text.strip()) < 50:
+        content = item.get_content()
+        soup = BeautifulSoup(content, 'html.parser')
+        text = soup.get_text("\n", strip=True)
+
+        if not text or len(text.strip()) < 50:
+            print(f"[SHORT] {item.get_name()} — only {len(text.strip())} chars, "
+                  f"keeping as gap placeholder")
+            # Don't skip — fall through with empty number_candidates
+
+        filename_lower = item.get_name().lower()
+        is_non_chapter = any(keyword in filename_lower for keyword in non_chapter_keywords)
+
+        if not is_non_chapter:
+            for heading in soup.find_all(['h1', 'h2', 'h3']):
+                if any(keyword in heading.get_text(strip=True).lower() for keyword in non_chapter_keywords):
+                    is_non_chapter = True
+                    break
+
+        if is_non_chapter:
+            print(f"[SKIP] {item.get_name()} — matched non-chapter keyword")
+            continue
+
+        # Collect standalone numbers from the first 30 leaf elements only.
+        # "Leaf" means the element has no child tags — just text. This avoids
+        # counting the same number multiple times due to nested spans/anchors.
+        number_candidates = []
+        seen_positions = set()  # (line, col) to deduplicate nested elements
+        all_elements = soup.find_all(True)[:50]
+
+        for element in all_elements:
+            # Only consider leaf nodes (no child tags)
+            if element.find(True) is not None:
                 continue
+            element_text = element.get_text(strip=True)
+            if re.match(r'^\d{1,3}$', element_text):
+                number_candidates.append(int(element_text))
 
-            chapter_number = None
-            title = item.get_name()
-            filename_lower = item.get_name().lower()
+        print(f"[PASS1] {item.get_name()} — number_candidates: {number_candidates}")
 
-            # Check if this is non-chapter content based on filename
-            is_non_chapter = any(keyword in filename_lower for keyword in non_chapter_keywords)
+        candidate_docs.append({
+            'item': item,
+            'soup': soup,
+            'text': text,
+            'number_candidates': number_candidates,
+        })
 
-            # Check if this is non-chapter content based on heading text
-            if not is_non_chapter:
-                headings = soup.find_all(['h1', 'h2', 'h3'])
-                for heading in headings:
-                    heading_text = heading.get_text(strip=True).lower()
-                    if any(keyword in heading_text for keyword in non_chapter_keywords):
-                        is_non_chapter = True
+    print(f"\n[PASS1 SUMMARY] {len(candidate_docs)} candidate documents collected\n")
+
+    # -------------------------------------------------------------------------
+    # PASS 2: Cross-document sequence validation
+    # -------------------------------------------------------------------------
+    max_depth = max((len(d['number_candidates']) for d in candidate_docs), default=0)
+    print(f"[PASS2] max_depth across all docs: {max_depth}")
+    chapter_position = None
+    chapter_position_mapping = {}
+
+    for i in range(max_depth):
+        values_at_i = [
+            (doc_idx, d['number_candidates'][i])
+            for doc_idx, d in enumerate(candidate_docs)
+            if len(d['number_candidates']) > i
+        ]
+
+        print(f"[PASS2] depth {i}: values_at_i = {values_at_i}")
+
+        if len(values_at_i) < 2:
+            print(f"[PASS2] depth {i}: skipping — fewer than 2 docs have a candidate here")
+            continue
+
+        best_run = []
+        current_run = [values_at_i[0]]
+
+        for j in range(1, len(values_at_i)):
+            prev_doc_idx, prev_val = values_at_i[j - 1]
+            curr_doc_idx, curr_val = values_at_i[j]
+            expected = prev_val + (curr_doc_idx - prev_doc_idx)
+            if curr_val == expected:
+                current_run.append(values_at_i[j])
+            else:
+                print(f"[PASS2] depth {i}: break in run at doc_idx={curr_doc_idx} "
+                      f"(got {curr_val}, expected {expected})")
+                if len(current_run) > len(best_run):
+                    best_run = current_run
+                current_run = [values_at_i[j]]
+
+        if len(current_run) > len(best_run):
+            best_run = current_run
+
+        threshold = max(3, len(values_at_i) // 2)
+        print(f"[PASS2] depth {i}: best_run={best_run} (len={len(best_run)}, threshold={threshold})")
+
+        if len(best_run) >= threshold:
+            chapter_position = i
+            chapter_position_mapping = {doc_idx: val for doc_idx, val in best_run}
+            print(f"[PASS2] ✅ Winning depth: {i}, mapping: {chapter_position_mapping}")
+            break
+        else:
+            print(f"[PASS2] depth {i}: best run too short, continuing to next depth")
+
+    if chapter_position is None:
+        print("[PASS2] ❌ No valid chapter sequence found across any depth")
+    # -------------------------------------------------------------------------
+    # PASS 3: Assign chapter numbers using all methods
+    # -------------------------------------------------------------------------
+    for doc in candidate_docs:
+        item = doc['item']
+        soup = doc['soup']
+        text = doc['text']
+        filename_lower = item.get_name().lower()
+        chapter_number = None
+        title = item.get_name()
+
+        # Method 1: Filename patterns
+        if "chapter" in filename_lower or "ch" in filename_lower:
+            for pattern in [r'chapter[_\s-]*(\d+)', r'ch[_\s-]*(\d+)', r'part0*(\d+)']:
+                match = re.search(pattern, filename_lower)
+                if match:
+                    chapter_number = int(match.group(1))
+                    break
+
+        # Method 2: HTML id attributes
+        if chapter_number is None:
+            for element in soup.find_all(['h1', 'h2', 'h3', 'div', 'section'],
+                                         id=re.compile(r'^c0*\d+$|^chapter0*\d+$', re.I)):
+                id_str = element.get('id', '')
+                for pattern in [r'^c0*(\d+)$', r'^chapter0*(\d+)$']:
+                    id_match = re.search(pattern, id_str, re.I)
+                    if id_match:
+                        chapter_number = int(id_match.group(1))
                         break
-
-            # Skip non-chapter content
-            if is_non_chapter:
-                continue
-
-            # Method 1: Check filename for chapter indicators
-            if "chapter" in filename_lower or "ch" in filename_lower:
-                # Match various filename patterns
-                patterns = [
-                    r'chapter[_\s-]*(\d+)',
-                    r'ch[_\s-]*(\d+)',
-                    r'part0*(\d+)',  # Also match part0006 style
-                ]
-                for pattern in patterns:
-                    match = re.search(pattern, filename_lower)
-                    if match:
-                        chapter_number = int(match.group(1))
-                        break
-
-            # Method 2: Check HTML elements for chapter indicators
-            if chapter_number is None:
-                # Look for elements with id attributes first (more reliable)
-                chapter_elements = soup.find_all(['h1', 'h2', 'h3', 'div', 'section'],
-                                                 id=re.compile(r'^c0*\d+$|^chapter0*\d+$', re.I))
-
-                for element in chapter_elements:
-                    id_str = element.get('id', '')
-                    # Match patterns like "c01", "c1", "chapter01" (must be mostly numeric)
-                    id_patterns = [
-                        r'^c0*(\d+)$',  # Exact match: c01, c1, c001
-                        r'^chapter0*(\d+)$',  # Exact match: chapter01, chapter1
-                    ]
-                    for pattern in id_patterns:
-                        id_match = re.search(pattern, id_str, re.I)
-                        if id_match:
-                            chapter_number = int(id_match.group(1))
-                            break
-
-                    if chapter_number is not None:
-                        break
-
-                # Only check class attributes if id didn't work
-                # And be very strict about it
-                if chapter_number is None:
-                    # Only match if the class is EXACTLY "chapter" followed by optional separators and digits
-                    chapter_elements = soup.find_all(['h1', 'h2', 'h3', 'div', 'section'],
-                                                     class_=re.compile(r'^chapter[_\s-]+\d+$', re.I))
-
-                    for element in chapter_elements:
-                        if element.get('class'):
-                            class_str = ' '.join(element.get('class'))
-                            # Only match "chapter-1", "chapter_1", "chapter 1" style
-                            class_match = re.search(r'^chapter[_\s-]+(\d+)$', class_str, re.I)
-                            if class_match:
-                                chapter_number = int(class_match.group(1))
-                                break
-
-                # Method 3: Extract title from heading elements
                 if chapter_number is not None:
-                    heading = soup.find(['h1', 'h2', 'h3'])
-                    if heading:
-                        heading_text = heading.get_text(strip=True)
-                        # Use heading text as title if it's meaningful
-                        if heading_text and len(heading_text) < 100:
-                            title = heading_text
+                    break
 
-            # Only add if we found a valid chapter number
-            if chapter_number is not None:
-                # Skip duplicates
-                if chapter_number in seen_chapters:
-                    print(f"⚠️  Duplicate chapter {chapter_number} found:")
-                    print(f"   Filename: {item.get_name()}")
-                    print(f"   Title: {title}")
-                    continue
-                seen_chapters.add(chapter_number)
+        # Method 3: HTML class attributes (strict match only)
+        if chapter_number is None:
+            for element in soup.find_all(['h1', 'h2', 'h3', 'div', 'section'],
+                                         class_=re.compile(r'^chapter[_\s-]+\d+$', re.I)):
+                class_str = ' '.join(element.get('class', []))
+                class_match = re.search(r'^chapter[_\s-]+(\d+)$', class_str, re.I)
+                if class_match:
+                    chapter_number = int(class_match.group(1))
+                    break
 
-                chapters.append({
-                    'chapter_number': chapter_number,
-                    'title': title,
-                    'content': text,
-                    'filename': item.get_name()
-                })
+        # Method 4: Cross-document sequence validation
+        if chapter_number is None and chapter_position is not None:
+            doc_idx = candidate_docs.index(doc)
+            if doc_idx in chapter_position_mapping:
+                chapter_number = chapter_position_mapping[doc_idx]
 
-    # Sort chapters by chapter number
+        if chapter_number is None:
+            continue
+
+        # Extract title from first heading if available
+        heading = soup.find(['h1', 'h2', 'h3'])
+        if heading:
+            heading_text = heading.get_text(strip=True)
+            if heading_text and len(heading_text) < 100:
+                title = heading_text
+
+        if chapter_number in seen_chapters:
+            print(f"⚠️  Duplicate chapter {chapter_number} found:")
+            print(f"   Filename: {item.get_name()}")
+            print(f"   Title: {title}")
+            continue
+
+        seen_chapters.add(chapter_number)
+        chapters.append({
+            'chapter_number': chapter_number,
+            'title': title,
+            'content': text,
+            'filename': item.get_name()
+        })
+
     chapters.sort(key=lambda x: x['chapter_number'])
-
     return chapters
 
 
@@ -681,7 +752,7 @@ def validate_and_deduplicate_characters_with_llm(epub_id: int, api_key: str = No
             - reduction: Number of duplicates removed
     """
     epub = EpubFile.objects.get(id=epub_id)
-    original_characters = list(Character.objects.filter(epub=epub_id).order_by('-mention_count'))
+    original_characters = list(Character.objects.filter(epub=epub).order_by('-mention_count'))
     original_count = len(original_characters)
 
     if original_count == 0:
