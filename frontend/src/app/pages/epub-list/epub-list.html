@@ -1,0 +1,12 @@
+<h1>EPUB Library</h1>
+
+<div *ngIf="epubs.length === 0">
+  <p>No EPUBs found.</p>
+</div>
+
+<div *ngFor="let epub of epubs">
+  <h3>{{ epub.original_filename }}</h3>
+  <p>Uploaded: {{ epub.uploaded_at }}</p>
+  <p>Status: {{ epub.status }}</p>
+  <hr>
+</div>
