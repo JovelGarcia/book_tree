@@ -1,1 +1,9 @@
-<router-outlet />
+<nav class="main-nav">
+  <a routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{exact: true}">Home</a>
+  <span class="separator">|</span>
+  <a routerLink="/upload" routerLinkActive="active">Upload</a>
+</nav>
+
+<main class="content">
+  <router-outlet />
+</main>
