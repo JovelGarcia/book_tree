@@ -8,7 +8,7 @@ import { CommonModule } from '@angular/common';
   imports: [CommonModule],
   templateUrl: './epub-list.html',
 })
-export class EpubListComponent implements OnInit {
+export class EpubList implements OnInit {
 
   epubs: any[] = [];
 
