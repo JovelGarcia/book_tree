@@ -1,12 +1,26 @@
-<h1>EPUB Library</h1>
+<div class="shell">
+  <header>
+    <h1>Library</h1>
+    <span class="count" *ngIf="!loading()">{{ epubs().length }} titles</span>
+  </header>
 
-<div *ngIf="epubs.length === 0">
-  <p>No EPUBs found.</p>
-</div>
+  <main>
+    <p class="loading" *ngIf="loading()">
+      <span class="pulse">Fetching titles…</span>
+    </p>
 
-<div *ngFor="let epub of epubs">
-  <h3>{{ epub.original_filename }}</h3>
-  <p>Uploaded: {{ epub.uploaded_at }}</p>
-  <p>Status: {{ epub.status }}</p>
-  <hr>
+    <p class="error" *ngIf="error()">{{ error() }}</p>
+
+    <ol class="list" *ngIf="!loading() && !error()">
+      <li
+        class="item"
+        *ngFor="let epub of epubs(); let i = index"
+        [style.animation-delay]="i * 40 + 'ms'"
+      >
+        <span class="index">{{ (i + 1).toString().padStart(2, '0') }}</span>
+        <span class="title">{{ stripExtension(epub.original_filename) }}</span>
+        <span class="badge badge--{{ epub.status }}">{{ statusLabel(epub.status) }}</span>
+      </li>
+    </ol>
+  </main>
 </div>

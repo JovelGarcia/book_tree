@@ -1,0 +1,122 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600&family=DM+Mono:wght@300;400&display=swap');
+
+.shell {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 2rem 6rem;
+  background: #f7f4ef;
+  min-height: 100vh;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 3.5rem 0 2rem;
+  border-bottom: 1px solid #d6d0c6;
+}
+
+h1 {
+  font-family: 'Playfair Display', serif;
+  font-size: 2rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: #1a1814;
+}
+
+.count {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 300;
+  color: #8a8479;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+main {
+  padding-top: 0.5rem;
+}
+
+/* ── States ── */
+
+.loading,
+.error {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.8rem;
+  color: #8a8479;
+  padding: 4rem 0;
+  margin: 0;
+}
+
+.error {
+  color: #b94a3a;
+}
+
+.pulse {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
+
+/* ── List ── */
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.item {
+  display: grid;
+  grid-template-columns: 2.5rem 1fr auto;
+  align-items: baseline;
+  gap: 1.25rem;
+  padding: 1.1rem 0;
+  border-bottom: 1px solid #e8e3da;
+  opacity: 0;
+  transform: translateY(6px);
+  animation: fadeUp 0.35s ease forwards;
+}
+
+@keyframes fadeUp {
+  to { opacity: 1; transform: none; }
+}
+
+.index {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.68rem;
+  font-weight: 300;
+  color: #b0a99e;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+.title {
+  font-family: 'Playfair Display', serif;
+  font-size: 1.05rem;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+  color: #1a1814;
+}
+
+/* ── Status badge ── */
+
+.badge {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.2em 0.6em;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+
+.badge--p  { background: #ede8df; color: #7a7268; }
+.badge--pr { background: #dff0e8; color: #2e6e52; }
+.badge--c  { background: #e8f0df; color: #3a6020; }
+.badge--f  { background: #f0e0de; color: #8a2e2e; }
