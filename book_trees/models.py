@@ -25,19 +25,21 @@ class EpubFile(models.Model):
     def __str__(self):
         return f"{self.original_filename} - {self.uploaded_at.strftime('%Y-%m-%d')}"
 
-class Chapter(models.Model):
-    epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE, related_name='chapters')
-    title = models.CharField(max_length=500, blank=True)
-    content = models.TextField()
-    chapter_number = models.IntegerField()
-    annotated_sentences = models.JSONField(default=list, blank=True)
+class Section(models.Model):
+    epub = models.ForeignKey(
+        EpubFile,
+        on_delete=models.CASCADE,
+        related_name='sections'
+    )
+    title = models.CharField(max_length=500)
+    order = models.IntegerField()
 
     class Meta:
-        ordering = ['epub', 'chapter_number']
-        unique_together = ['epub', 'chapter_number']
+        ordering = ['epub', 'order']
+        unique_together = ['epub', 'order']
 
     def __str__(self):
-        return f"{self.epub.original_filename} - Chapter {self.chapter_number}"
+        return f"{self.epub.original_filename} - {self.title}"
 
 
 class Character(models.Model):
@@ -53,6 +55,39 @@ class Character(models.Model):
 
     def __str__(self):
         return f"{self.name}"
+
+class Chapter(models.Model):
+    epub = models.ForeignKey(
+        EpubFile,
+        on_delete=models.CASCADE,
+        related_name='chapters'
+    )
+    section = models.ForeignKey(
+        Section,
+        on_delete=models.CASCADE,
+        related_name='chapters',
+        null=True,
+        blank=True
+    )
+    title = models.CharField(max_length=500, blank=True)
+    content = models.TextField()
+    chapter_number = models.IntegerField()
+    annotated_sentences = models.JSONField(default=list, blank=True)
+
+    narrators = models.ManyToManyField(
+        Character,
+        related_name='narrated_chapters',
+        blank=True
+    )
+
+    class Meta:
+        ordering = ['epub', 'section__order', 'chapter_number']
+        unique_together = ['epub', 'section', 'chapter_number']
+
+    def __str__(self):
+        if self.section:
+            return f"{self.section.title} - Chapter {self.chapter_number}"
+        return f"{self.epub.original_filename} - Chapter {self.chapter_number}"
 
 
 
