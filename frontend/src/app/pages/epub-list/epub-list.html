@@ -1,15 +1,65 @@
 <div class="shell">
+
   <header>
     <h1>Library</h1>
-    <span class="count" *ngIf="!loading()">{{ epubs().length }} titles</span>
+    <div class="header-actions">
+      <span class="count" *ngIf="!loading()">{{ epubs().length }} titles</span>
+      <button class="btn-upload" (click)="togglePanel()" [class.active]="panelOpen()">
+        {{ panelOpen() ? 'Cancel' : 'Upload' }}
+      </button>
+    </div>
   </header>
 
-  <main>
-    <p class="loading" *ngIf="loading()">
-      <span class="pulse">Fetching titles…</span>
-    </p>
+  <!-- Upload panel -->
+  <div class="upload-panel" [class.open]="panelOpen()">
+    <div class="upload-inner">
 
-    <p class="error" *ngIf="error()">{{ error() }}</p>
+      <div
+        class="drop-zone"
+        [class.drag-over]="dragOver()"
+        [class.has-file]="selectedFile()"
+        (dragover)="onDragOver($event)"
+        (dragleave)="onDragLeave()"
+        (drop)="onDrop($event)"
+        (click)="fileInput.click()"
+      >
+        <input
+          #fileInput
+          type="file"
+          accept=".epub"
+          hidden
+          (change)="onFileSelected($event)"
+        />
+
+        <ng-container *ngIf="!selectedFile(); else fileSelected">
+          <span class="drop-icon">↑</span>
+          <p class="drop-label">Drop an <em>.epub</em> here, or click to browse</p>
+        </ng-container>
+
+        <ng-template #fileSelected>
+          <span class="drop-icon file-icon">✦</span>
+          <p class="drop-label file-name">{{ selectedFile()!.name }}</p>
+          <p class="drop-sub">{{ (selectedFile()!.size / 1024 / 1024).toFixed(2) }} MB</p>
+        </ng-template>
+      </div>
+
+      <p class="upload-error" *ngIf="uploadError()">{{ uploadError() }}</p>
+
+      <button
+        class="btn-submit"
+        [disabled]="!selectedFile() || uploading()"
+        (click)="submit()"
+      >
+        {{ uploading() ? 'Uploading…' : 'Submit' }}
+      </button>
+
+    </div>
+  </div>
+
+  <!-- List -->
+  <main>
+    <p class="state-msg" *ngIf="loading()"><span class="pulse">Fetching titles…</span></p>
+    <p class="state-msg error" *ngIf="error()">{{ error() }}</p>
 
     <ol class="list" *ngIf="!loading() && !error()">
       <li
@@ -23,4 +73,5 @@
       </li>
     </ol>
   </main>
+
 </div>

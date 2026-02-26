@@ -8,6 +8,8 @@
   min-height: 100vh;
 }
 
+/* ── Header ── */
+
 header {
   display: flex;
   align-items: baseline;
@@ -25,6 +27,12 @@ h1 {
   color: #1a1814;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+}
+
 .count {
   font-family: 'DM Mono', monospace;
   font-size: 0.72rem;
@@ -34,14 +42,159 @@ h1 {
   text-transform: uppercase;
 }
 
-main {
-  padding-top: 0.5rem;
+/* ── Upload button ── */
+
+.btn-upload {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.45em 1em;
+  border: 1px solid #1a1814;
+  border-radius: 2px;
+  background: transparent;
+  color: #1a1814;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.btn-upload:hover,
+.btn-upload.active {
+  background: #1a1814;
+  color: #f7f4ef;
+}
+
+/* ── Upload panel ── */
+
+.upload-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.35s ease;
+  overflow: hidden;
+}
+
+.upload-panel.open {
+  grid-template-rows: 1fr;
+}
+
+.upload-inner {
+  min-height: 0;
+  padding: 0;
+  transition: padding 0.35s ease;
+}
+
+.upload-panel.open .upload-inner {
+  padding: 2rem 0 1.5rem;
+}
+
+/* ── Drop zone ── */
+
+.drop-zone {
+  border: 1px dashed #b0a99e;
+  border-radius: 4px;
+  padding: 2.5rem 2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  text-align: center;
+  background: #faf8f4;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: #1a1814;
+  background: #f0ece4;
+}
+
+.drop-zone.has-file {
+  border-style: solid;
+  border-color: #3a6020;
+  background: #f2f7ee;
+}
+
+.drop-icon {
+  font-size: 1.5rem;
+  color: #8a8479;
+  line-height: 1;
+}
+
+.file-icon {
+  color: #3a6020;
+}
+
+.drop-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.8rem;
+  font-weight: 300;
+  color: #5a5550;
+  margin: 0;
+}
+
+.drop-label em {
+  font-style: normal;
+  font-weight: 400;
+  color: #1a1814;
+}
+
+.file-name {
+  font-weight: 400;
+  color: #1a1814;
+  word-break: break-all;
+}
+
+.drop-sub {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.68rem;
+  color: #8a8479;
+  margin: 0;
+}
+
+/* ── Upload error ── */
+
+.upload-error {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.75rem;
+  color: #b94a3a;
+  margin: 0.75rem 0 0;
+}
+
+/* ── Submit button ── */
+
+.btn-submit {
+  margin-top: 1rem;
+  font-family: 'DM Mono', monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.6em 1.5em;
+  background: #1a1814;
+  color: #f7f4ef;
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.btn-submit:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-submit:not(:disabled):hover {
+  opacity: 0.75;
 }
 
 /* ── States ── */
 
-.loading,
-.error {
+main {
+  padding-top: 0.5rem;
+}
+
+.state-msg {
   font-family: 'DM Mono', monospace;
   font-size: 0.8rem;
   color: #8a8479;
@@ -49,7 +202,7 @@ main {
   margin: 0;
 }
 
-.error {
+.state-msg.error {
   color: #b94a3a;
 }
 
