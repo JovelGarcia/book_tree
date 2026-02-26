@@ -1,18 +1,33 @@
 import re
+from collections import defaultdict
+from typing import Optional
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
-from .models import EpubFile, Chapter
+from .models import EpubFile, Chapter, Section
 
 
 # ==============================================================================
 # LANDMARK KEYWORD DEFINITIONS
 # ==============================================================================
 
+# Section dividers — short title pages that split the book into parts/books/acts.
+# Detected inside the book-content zone; they become Section objects, not chapters.
+SECTION_TITLE_PATTERNS = [
+    r'^book\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)$',
+    r'^part\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)$',
+    r'^act\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)$',
+    r'^volume\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)$',
+    r'^section\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)$',
+    r'^book\s+[ivxlcdm]+$',
+    r'^part\s+[ivxlcdm]+$',
+    r'^act\s+[ivxlcdm]+$',
+]
+
 FRONT_MATTER_LANDMARKS = {
     'cover':        ['cover'],
     'title_page':   ['title page', 'half title'],
-    'books_by':     ['books by', 'also by'],
+    'books_by':     ['books by', 'also by', 'works by'],
     'toc':          ['table of contents', 'contents'],
     'copyright':    ['copyright'],
     'dedication':   ['dedication'],
@@ -24,20 +39,29 @@ FRONT_MATTER_LANDMARKS = {
 }
 
 BACK_MATTER_LANDMARKS = {
-    'epilogue':       ['epilogue'],
-    'afterword':      ['afterword'],
-    'appendix':       ['appendix', 'appendixes', 'appendices'],
-    'acknowledgment': ['acknowledgment', 'acknowledgements', 'acknowledgement'],
-    'glossary':       ['glossary'],
-    'notes':          ['notes', 'endnotes', 'footnotes'],
-    'bibliography':   ['bibliography', 'references', 'works cited'],
-    'index':          ['index'],
-    'about_author':   ['about the author', 'about the authors', 'author bio'],
-    'also_by':        ['also by', 'books by'],
+    'epilogue':        ['epilogue'],
+    'afterword':       ['afterword'],
+    'appendix':        ['appendix', 'appendixes', 'appendices'],
+    'acknowledgment':  ['acknowledgment', 'acknowledgements', 'acknowledgement'],
+    'glossary':        ['glossary'],
+    'notes':           ['notes', 'endnotes', 'footnotes'],
+    'bibliography':    ['bibliography', 'references', 'works cited'],
+    'index':           ['index'],
+    'about_author':    ['about the author', 'about the authors', 'author bio'],
+    'also_by':         ['also by', 'books by', 'works by'],
+    'maps':            ['maps', 'map of'],
+    'about_publisher': ['about the publisher', 'about publisher'],
+    'copyright':       ['copyright page', 'copyright ©', 'all rights reserved'],
 }
 
-# Landmarks that can legitimately appear in either front OR back matter
+# Landmarks that can legitimately appear in either front OR back matter.
+# Position in the book (front half vs back half) determines classification.
 AMBIGUOUS_LANDMARKS = {'about_author', 'also_by'}
+
+# How far into a document (as a fraction of total leaf elements) a landmark
+# keyword must appear to be considered a true structural heading.
+# Keywords appearing deeper in the document are treated as narrative prose.
+LANDMARK_HEADING_DEPTH_LIMIT = 0.25
 
 
 # ==============================================================================
@@ -50,26 +74,64 @@ def _text_matches_keywords(text: str, keyword_list: list) -> bool:
     return any(kw in t for kw in keyword_list)
 
 
-def _doc_landmark_type(soup: BeautifulSoup, landmark_map: dict) -> str | None:
+def _is_section_title_doc(soup: BeautifulSoup) -> Optional[str]:
     """
-    Check soup against a landmark map and return the first matching landmark
-    key, or None.
+    Return a normalised section title (e.g. 'Book One', 'Part II') if this
+    document is a section-divider title page, else None.
 
-    Checks (in priority order):
-      1. h1/h2/h3/h4 heading text
-      2. Short, prominent leaf-node text (bold spans, standalone divs/p)
+    Checks headings first; falls back to short leaf-node text for docs with
+    no heading tags (common in calibre-converted EPUBs).
     """
+    candidates = []
+
+    headings = soup.find_all(['h1', 'h2', 'h3', 'h4'])
+    if headings:
+        candidates = [h.get_text().strip() for h in headings]
+    else:
+        # Short doc with no headings — check all leaf nodes
+        text = soup.get_text(' ').strip()
+        if len(text) < 200:
+            for tag in soup.find_all(True):
+                if tag.find(True):
+                    continue
+                t = tag.get_text().strip()
+                if t:
+                    candidates.append(t)
+
+    for candidate in candidates:
+        for pattern in SECTION_TITLE_PATTERNS:
+            if re.match(pattern, candidate.lower()):
+                return candidate
+
+    return None
+
+
+def _doc_landmark_type(soup: BeautifulSoup, landmark_map: dict,
+                       depth_limit: float = LANDMARK_HEADING_DEPTH_LIMIT) -> Optional[str]:
+    """
+    Check soup against a landmark map, return the matching key or None.
+
+    Heading tags (h1–h4) are always checked regardless of position — they are
+    explicitly structural.  Other leaf nodes (div/p/span) are only checked
+    within the first `depth_limit` fraction of all leaf elements, so a keyword
+    buried deep in chapter prose never triggers a false landmark.
+    """
+    # Priority 1: explicit heading tags — position doesn't matter
     for tag in soup.find_all(['h1', 'h2', 'h3', 'h4']):
-        text = tag.get_text(strip=True)
+        text = tag.get_text().strip()
         for key, keywords in landmark_map.items():
             if _text_matches_keywords(text, keywords):
                 return key
 
-    # Short leaf nodes that look like section titles
-    for tag in soup.find_all(['div', 'p', 'span']):
-        if tag.find(True):          # skip non-leaves
-            continue
-        text = tag.get_text(strip=True)
+    # Priority 2: short prominent leaf nodes, top fraction of document only
+    all_leaves = [
+        tag for tag in soup.find_all(['div', 'p', 'span'])
+        if not tag.find(True)
+    ]
+    limit = max(1, int(len(all_leaves) * depth_limit))
+
+    for tag in all_leaves[:limit]:
+        text = tag.get_text().strip()
         if not text or len(text) > 80:
             continue
         for key, keywords in landmark_map.items():
@@ -81,176 +143,390 @@ def _doc_landmark_type(soup: BeautifulSoup, landmark_map: dict) -> str | None:
 
 def identify_landmarks(all_docs: list) -> list:
     """
-    Walk all_docs (each entry must have 'item' and 'soup') and annotate each
-    with a 'landmark' key.
+    Annotate each doc in all_docs with:
+      'landmark'      — None | landmark-type string (e.g. 'toc', 'appendix')
+      'section_title' — None | section title string (e.g. 'Book One')
 
-    Returns the same list with 'landmark' added to every entry:
-      - None  → ordinary content (presumed chapter territory)
-      - str   → landmark type, e.g. 'toc', 'dedication', 'appendix'
+    Front matter: scan forward, advancing the front-matter boundary only for
+    landmark docs and short/empty gap docs.  The FIRST substantial
+    (≥300 chars) non-landmark doc ends the front-matter zone.
 
-    Strategy
-    --------
-    Scans from the front for front-matter landmarks and from the back for
-    back-matter landmarks, stopping in each direction once we cross the
-    midpoint. Ambiguous landmarks (about_author, also_by) detected in the
-    front half are treated as front matter; in the back half as back matter.
+    Back matter: scan backward from the end with the same logic.
+
+    Section titles: detected on every non-landmark doc inside the book-content
+    zone that looks like a short section-divider title page.
     """
     n = len(all_docs)
-    midpoint = n // 2
 
     for doc in all_docs:
-        doc['landmark'] = None
+        doc['landmark']      = None
+        doc['section_title'] = None
 
-    # --- Front matter scan (index 0 → midpoint) ---
-    for i in range(min(midpoint + 1, n)):
-        doc = all_docs[i]
+    # ---- Forward scan: front matter ----------------------------------------
+    last_front_idx = -1
+    for i in range(n):
+        doc  = all_docs[i]
+        text = doc['soup'].get_text().strip()
+
         lm = _doc_landmark_type(doc['soup'], FRONT_MATTER_LANDMARKS)
-        if lm:
-            doc['landmark'] = lm
-            continue
-        # Check ambiguous landmarks in the front half
-        lm = _doc_landmark_type(doc['soup'], {
-            k: v for k, v in BACK_MATTER_LANDMARKS.items()
-            if k in AMBIGUOUS_LANDMARKS
-        })
-        if lm:
-            doc['landmark'] = lm
+        if lm is None:
+            lm = _doc_landmark_type(doc['soup'], {
+                k: v for k, v in BACK_MATTER_LANDMARKS.items()
+                if k in AMBIGUOUS_LANDMARKS
+            })
 
-    # --- Back matter scan (index n-1 → midpoint, stop at first non-match) ---
-    # Scans backwards and continues as long as back-matter (or short/empty)
-    # docs are found. Stops on substantial content that isn't back matter, so
-    # chapter content that mentions "appendix" in passing isn't mis-classified.
-    for i in range(n - 1, midpoint - 1, -1):
-        doc = all_docs[i]
+        if lm:
+            doc['landmark'] = lm
+            last_front_idx  = i
+        elif len(text) >= 300:
+            break   # Substantial non-landmark content — front matter ends here
+        # Short/empty doc — don't advance boundary but keep scanning
+
+    # ---- Backward scan: back matter ----------------------------------------
+    first_back_idx = n
+    for i in range(n - 1, -1, -1):
+        doc  = all_docs[i]
+        text = doc['soup'].get_text().strip()
+
         if doc['landmark'] is not None:
-            continue  # Already tagged by front-matter pass; leave it.
+            continue  # Already tagged by forward pass
 
         lm = _doc_landmark_type(doc['soup'], BACK_MATTER_LANDMARKS)
         if lm:
             doc['landmark'] = lm
-        else:
-            text = doc['soup'].get_text(strip=True)
-            if len(text) < 100:
-                pass  # Short separator — handled by gap-fill below
-            else:
-                break  # Substantial non-back-matter content — stop scanning
+            first_back_idx  = i
+        elif len(text) >= 300:
+            break   # Substantial non-back-matter content — stop
+        # Short/empty doc — keep scanning
 
-    # --- Gap-fill: short docs sandwiched between back-matter docs ---
+    # ---- Gap-fill: short docs sandwiched between back-matter docs -----------
     for i in range(1, n - 1):
         if (all_docs[i]['landmark'] is None
                 and all_docs[i - 1]['landmark'] is not None
-                and all_docs[i + 1]['landmark'] is not None):
-            text = all_docs[i]['soup'].get_text(strip=True)
+                and all_docs[i + 1]['landmark'] is not None
+                and i >= first_back_idx - 2):
+            text = all_docs[i]['soup'].get_text().strip()
             if len(text) < 100:
                 all_docs[i]['landmark'] = 'separator'
+
+    # ---- Section title detection (inside book content only) ----------------
+    book_start = last_front_idx + 1
+    book_end   = (first_back_idx - 1) if first_back_idx < n else (n - 1)
+
+    for i in range(book_start, book_end + 1):
+        doc = all_docs[i]
+        if doc['landmark'] is not None:
+            continue
+        st = _is_section_title_doc(doc['soup'])
+        if st:
+            doc['section_title'] = st
+            print(f"[LANDMARK] Section title at doc[{i:03d}] "
+                  f"{doc['item'].get_name()} — '{st}'")
 
     return all_docs
 
 
 def _book_content_bounds(all_docs: list) -> tuple:
     """
-    Given annotated all_docs, return (start_idx, end_idx) — the inclusive
-    range of indices that represent 'real book content' (i.e. not landmarks).
-
-    start_idx : first doc after the last consecutive front-matter landmark
-    end_idx   : last doc before the first consecutive back-matter landmark
-                (end_idx is INCLUSIVE)
+    Return (start_idx, end_idx) inclusive — the real book-content zone.
+    Mirrors the same skip-short-gap-docs logic used in identify_landmarks.
     """
     n = len(all_docs)
 
     FRONT_MATTER_TYPES = set(FRONT_MATTER_LANDMARKS.keys()) | AMBIGUOUS_LANDMARKS
     BACK_MATTER_TYPES  = set(BACK_MATTER_LANDMARKS.keys())  | {'separator'}
 
-    # Walk forward to find where front matter ends
+    # Walk forward
     start_idx = 0
-    for i in range(n):
-        lm = all_docs[i]['landmark']
+    i = 0
+    while i < n:
+        lm   = all_docs[i]['landmark']
+        text = all_docs[i]['soup'].get_text().strip()
         if lm in FRONT_MATTER_TYPES:
             start_idx = i + 1
-        elif lm is None:
-            break   # First non-landmark doc ends the front-matter zone
+            i += 1
+        elif len(text) < 300 and lm is None:
+            i += 1   # Short gap — keep scanning without advancing boundary
+        else:
+            break
 
-    # Walk backward to find where back matter begins
+    # Walk backward
     end_idx = n - 1
-    for i in range(n - 1, -1, -1):
-        lm = all_docs[i]['landmark']
+    i = n - 1
+    while i >= 0:
+        lm   = all_docs[i]['landmark']
+        text = all_docs[i]['soup'].get_text().strip()
         if lm in BACK_MATTER_TYPES:
             end_idx = i - 1
-        elif lm is None:
-            break   # First non-landmark doc (from the back) ends back-matter zone
+            i -= 1
+        elif len(text) < 300 and lm is None:
+            i -= 1
+        else:
+            break
 
     return start_idx, end_idx
+
+
+# ==============================================================================
+# SEQUENCE DETECTION  (multi-section aware)
+# ==============================================================================
+
+def _find_chapter_sequences(candidate_docs: list) -> list:
+    """
+    Find all valid sequential chapter-number runs across candidate_docs.
+
+    For each depth position in number_candidates:
+      - Build sequential runs (consecutive values with correct gaps).
+      - Accept runs of length ≥ MIN_RUN_LENGTH (3).
+      - Collect ALL non-overlapping runs at that depth.
+
+    The depth with the greatest total doc coverage wins.  This naturally
+    handles multi-section books where chapter numbering restarts (Book 1:
+    chapters 1-12, Book 2: chapters 1-10 → two runs at the same depth).
+
+    Returns a list of sequence dicts:
+      {
+        'doc_indices':        [candidate_doc_idx, ...],
+        'chapter_numbers':    [int, ...],
+        'start_candidate_idx': int,
+        'end_candidate_idx':   int,
+      }
+    """
+    MIN_RUN_LENGTH = 3
+
+    best_depth      = None
+    best_depth_runs = []
+
+    max_depth = max(
+        (len(d.get('number_candidates', [])) for d in candidate_docs),
+        default=0
+    )
+    print(f"[PASS2] max_depth across all candidate docs: {max_depth}")
+
+    for depth in range(max_depth):
+        values_at_depth = [
+            (doc_idx, d['number_candidates'][depth])
+            for doc_idx, d in enumerate(candidate_docs)
+            if len(d.get('number_candidates', [])) > depth
+        ]
+        print(f"[PASS2] depth {depth}: values = {values_at_depth}")
+
+        if len(values_at_depth) < MIN_RUN_LENGTH:
+            print(f"[PASS2] depth {depth}: fewer than {MIN_RUN_LENGTH} docs — skipping")
+            continue
+
+        # Build all sequential runs at this depth
+        runs        = []
+        current_run = [values_at_depth[0]]
+
+        for j in range(1, len(values_at_depth)):
+            prev_idx, prev_val = values_at_depth[j - 1]
+            curr_idx, curr_val = values_at_depth[j]
+            expected = prev_val + (curr_idx - prev_idx)
+            if curr_val == expected:
+                current_run.append(values_at_depth[j])
+            else:
+                if len(current_run) >= MIN_RUN_LENGTH:
+                    runs.append(current_run)
+                    print(f"[PASS2] depth {depth}: accepted run len={len(current_run)} "
+                          f"chapters {current_run[0][1]}–{current_run[-1][1]}")
+                else:
+                    print(f"[PASS2] depth {depth}: dropped short run len={len(current_run)}")
+                current_run = [values_at_depth[j]]
+
+        if len(current_run) >= MIN_RUN_LENGTH:
+            runs.append(current_run)
+            print(f"[PASS2] depth {depth}: accepted run len={len(current_run)} "
+                  f"chapters {current_run[0][1]}–{current_run[-1][1]}")
+
+        if not runs:
+            print(f"[PASS2] depth {depth}: no runs met threshold")
+            continue
+
+        total_coverage = sum(len(r) for r in runs)
+        print(f"[PASS2] depth {depth}: {len(runs)} run(s), total coverage = {total_coverage}")
+
+        if total_coverage > sum(len(r) for r in best_depth_runs):
+            best_depth      = depth
+            best_depth_runs = runs
+
+    if not best_depth_runs:
+        print("[PASS2] ❌ No valid chapter sequences found")
+        return []
+
+    print(f"\n[PASS2] ✅ Best depth: {best_depth}, "
+          f"runs: {[len(r) for r in best_depth_runs]} "
+          f"(total {sum(len(r) for r in best_depth_runs)} chapters)\n")
+
+    return [
+        {
+            'doc_indices':         [idx for idx, _ in run],
+            'chapter_numbers':     [val for _, val in run],
+            'start_candidate_idx': run[0][0],
+            'end_candidate_idx':   run[-1][0],
+        }
+        for run in best_depth_runs
+    ]
+
+
+# ==============================================================================
+# SECTION ASSIGNMENT
+# ==============================================================================
+
+def _assign_sections(candidate_docs: list, all_docs: list,
+                     sequences: list) -> list:
+    """
+    Map each sequence to a Section by looking for section-title docs that
+    precede it in the global all_docs order.
+
+    Returns a list of section dicts:
+      {
+        'title': str,
+        'order': int,
+        'sequence': <sequence dict>
+      }
+    """
+    if not sequences:
+        return []
+
+    if len(sequences) == 1:
+        return [{'title': '', 'order': 1, 'sequence': sequences[0]}]
+
+    # Map candidate_doc_idx → global all_docs index via object identity
+    candidate_to_global = {}
+    cand_ptr = 0
+    for g_idx, doc in enumerate(all_docs):
+        if cand_ptr < len(candidate_docs) and doc is candidate_docs[cand_ptr]:
+            candidate_to_global[cand_ptr] = g_idx
+            cand_ptr += 1
+
+    seq_global_starts = [
+        candidate_to_global.get(seq['start_candidate_idx'],
+                                seq['start_candidate_idx'])
+        for seq in sequences
+    ]
+
+    section_results = []
+    for s_idx, (seq, g_start) in enumerate(zip(sequences, seq_global_starts)):
+        title = None
+        prev_g_start = seq_global_starts[s_idx - 1] if s_idx > 0 else 0
+
+        for g_idx in range(g_start - 1, prev_g_start - 1, -1):
+            st = all_docs[g_idx].get('section_title')
+            if st:
+                title = st
+                break
+
+        if title is None:
+            title = f'Part {s_idx + 1}'
+            print(f"[SECTIONS] No section title found before sequence {s_idx + 1} "
+                  f"— auto title '{title}'")
+
+        section_results.append({
+            'title':    title,
+            'order':    s_idx + 1,
+            'sequence': seq,
+        })
+        print(f"[SECTIONS] Section {s_idx + 1}: '{title}' — "
+              f"{len(seq['doc_indices'])} chapters "
+              f"({seq['chapter_numbers'][0]}–{seq['chapter_numbers'][-1]})")
+
+    return section_results
 
 
 # ==============================================================================
 # CHAPTER EXTRACTION
 # ==============================================================================
 
-def extract_chapters_from_epub(epub_path: str) -> list:
+def extract_chapters_from_epub(epub_path: str) -> dict:
     """
-    Extract chapters and text from an EPUB file.
+    Extract chapters and section structure from an EPUB file.
 
-    Chapter identification methods (in priority order):
-      1. Filename patterns   (chapter_01, ch01, …)
-      2. HTML id attributes  (c01, chapter01, …)
-      3. HTML class attributes
-      4. Cross-document sequence validation of standalone numbers near the
-         top of each document
+    Returns:
+      {
+        'sections': [
+          {
+            'title':    str,   # '' means no sections (flat book)
+            'order':    int,
+            'chapters': [
+              {
+                'chapter_number': int,
+                'title':   str,
+                'content': str,
+                'filename': str,
+              }, ...
+            ]
+          }, ...
+        ]
+      }
 
-    Landmark detection is performed across ALL documents first to establish
-    book boundaries (front matter / chapter content / back matter). Only
-    documents that fall inside the book-content zone are eligible to be
-    chapters, regardless of which chapter-identification method succeeds.
+    Phases
+    ------
+    Phase 0 : Parse all documents.
+    Phase 1 : Landmark + section-title identification.
+    Pass  1 : Filter to candidate chapter documents (inside book-content zone,
+              not landmarks, not section titles, no non-chapter filename).
+    Pass  2 : Multi-run sequence detection — finds all sequential chapter runs
+              including restarts for multi-section books.
+    Pass  3 : Assign chapter numbers (explicit methods first, sequence fallback).
+    Pass  4 : Group by section; deduplicate within each section.
     """
     book = epub.read_epub(epub_path)
 
-    non_chapter_keywords = [
-        'acknowledgment', 'acknowledgement', 'about', 'author', 'copyright',
-        'dedication', 'foreword', 'preface', 'introduction', 'prologue',
-        'epilogue', 'afterword', 'appendix', 'glossary', 'contents',
-        'toc', 'cover', 'title', 'half', 'bio', 'also by', 'books by',
+    non_chapter_filename_keywords = [
+        'acknowledgment', 'acknowledgement', 'copyright', 'dedication',
+        'foreword', 'preface', 'prologue', 'epilogue', 'afterword',
+        'appendix', 'glossary', 'toc', 'cover', 'titlepage', 'title_page',
+        'halftitle', 'half_title', 'also_by', 'about_author',
     ]
 
     # =========================================================================
     # PHASE 0 — Parse every document.
-    #           We need the full list for landmark detection before filtering.
     # =========================================================================
     all_docs = []
-
     for item in book.get_items():
         if item.get_type() != ebooklib.ITEM_DOCUMENT:
             continue
         content = item.get_content()
         soup    = BeautifulSoup(content, 'html.parser')
-        text    = soup.get_text("\n", strip=True)
+        text    = soup.get_text("\n").strip()
         all_docs.append({
-            'item':     item,
-            'soup':     soup,
-            'text':     text,
-            'landmark': None,
+            'item':          item,
+            'soup':          soup,
+            'text':          text,
+            'landmark':      None,
+            'section_title': None,
         })
 
     print(f"\n[PHASE 0] {len(all_docs)} total documents parsed")
 
     # =========================================================================
-    # PHASE 1 — Landmark identification across the full document list.
+    # PHASE 1 — Landmark + section-title identification.
     # =========================================================================
     all_docs = identify_landmarks(all_docs)
 
     print("\n[PHASE 1] Landmark summary:")
+    any_found = False
     for i, doc in enumerate(all_docs):
         lm = doc['landmark']
+        st = doc['section_title']
         if lm:
-            print(f"  [{i:03d}] {doc['item'].get_name():<40}  landmark={lm}")
+            print(f"  [{i:03d}] {doc['item'].get_name():<45}  landmark={lm}")
+            any_found = True
+        if st:
+            print(f"  [{i:03d}] {doc['item'].get_name():<45}  section_title='{st}'")
+            any_found = True
+    if not any_found:
+        print("  (none detected)")
 
     book_start, book_end = _book_content_bounds(all_docs)
     print(f"\n[PHASE 1] Book content zone : doc[{book_start}] → doc[{book_end}]  "
-          f"({book_end - book_start + 1} documents)")
+          f"({max(0, book_end - book_start + 1)} documents)")
     print(f"          Front matter      : doc[0] → doc[{book_start - 1}]")
-    print(f"          Back matter       : doc[{book_end + 1}] → doc[{len(all_docs) - 1}]")
+    print(f"          Back matter       : doc[{book_end + 1}] → doc[{len(all_docs) - 1}]\n")
 
     # =========================================================================
-    # PASS 1 — Filter to candidate chapter documents.
+    # PASS 1 — Build candidate_docs list.
     # =========================================================================
     candidate_docs = []
 
@@ -260,42 +536,34 @@ def extract_chapters_from_epub(epub_path: str) -> list:
         text           = doc['text']
         filename_lower = item.get_name().lower()
 
-        # Must be inside the book-content zone
         if global_idx < book_start or global_idx > book_end:
-            print(f"[PASS1] {item.get_name()} — outside book-content zone "
-                  f"(global_idx={global_idx}), skipping")
+            print(f"[PASS1] {item.get_name()} — outside book-content zone, skipping")
             continue
 
-        # Landmark docs are not chapters
         if doc['landmark'] is not None:
-            print(f"[PASS1] {item.get_name()} — is landmark '{doc['landmark']}', skipping")
+            print(f"[PASS1] {item.get_name()} — landmark '{doc['landmark']}', skipping")
+            continue
+
+        if doc['section_title'] is not None:
+            print(f"[PASS1] {item.get_name()} — section title '{doc['section_title']}', skipping")
             continue
 
         if not text or len(text.strip()) < 50:
             print(f"[PASS1] {item.get_name()} — only {len(text.strip())} chars, "
                   f"keeping as gap placeholder")
 
-        # Non-chapter keyword filter (filename)
-        is_non_chapter = any(kw in filename_lower for kw in non_chapter_keywords)
-
-        # Non-chapter keyword filter (headings)
-        if not is_non_chapter:
-            for heading in soup.find_all(['h1', 'h2', 'h3']):
-                if any(kw in heading.get_text(strip=True).lower()
-                       for kw in non_chapter_keywords):
-                    is_non_chapter = True
-                    break
-
-        if is_non_chapter:
-            print(f"[PASS1] {item.get_name()} — matched non-chapter keyword, skipping")
+        # Filename-only keyword filter (heading keywords now handled by the
+        # depth-limited landmark detector, not here)
+        if any(kw in filename_lower for kw in non_chapter_filename_keywords):
+            print(f"[PASS1] {item.get_name()} — filename matched non-chapter keyword, skipping")
             continue
 
         # Collect standalone numbers from the first 50 leaf elements
         number_candidates = []
         for element in soup.find_all(True)[:50]:
-            if element.find(True) is not None:   # not a leaf
+            if element.find(True) is not None:
                 continue
-            element_text = element.get_text(strip=True)
+            element_text = element.get_text().strip()
             if re.match(r'^\d{1,3}$', element_text):
                 number_candidates.append(int(element_text))
 
@@ -307,75 +575,28 @@ def extract_chapters_from_epub(epub_path: str) -> list:
     print(f"\n[PASS1 SUMMARY] {len(candidate_docs)} candidate documents collected\n")
 
     # =========================================================================
-    # PASS 2 — Cross-document sequence validation.
+    # PASS 2 — Multi-run sequence detection.
     # =========================================================================
-    max_depth = max(
-        (len(d['number_candidates']) for d in candidate_docs),
-        default=0
-    )
-    print(f"[PASS2] max_depth across all docs: {max_depth}")
+    sequences = _find_chapter_sequences(candidate_docs)
 
-    chapter_position         = None
-    chapter_position_mapping = {}
-
-    for i in range(max_depth):
-        values_at_i = [
-            (doc_idx, d['number_candidates'][i])
-            for doc_idx, d in enumerate(candidate_docs)
-            if len(d['number_candidates']) > i
-        ]
-        print(f"[PASS2] depth {i}: values_at_i = {values_at_i}")
-
-        if len(values_at_i) < 2:
-            print(f"[PASS2] depth {i}: skipping — fewer than 2 docs have a candidate here")
-            continue
-
-        best_run    = []
-        current_run = [values_at_i[0]]
-
-        for j in range(1, len(values_at_i)):
-            prev_doc_idx, prev_val = values_at_i[j - 1]
-            curr_doc_idx, curr_val = values_at_i[j]
-            expected = prev_val + (curr_doc_idx - prev_doc_idx)
-            if curr_val == expected:
-                current_run.append(values_at_i[j])
-            else:
-                print(f"[PASS2] depth {i}: break in run at doc_idx={curr_doc_idx} "
-                      f"(got {curr_val}, expected {expected})")
-                if len(current_run) > len(best_run):
-                    best_run = current_run
-                current_run = [values_at_i[j]]
-
-        if len(current_run) > len(best_run):
-            best_run = current_run
-
-        threshold = max(3, len(values_at_i) // 2)
-        print(f"[PASS2] depth {i}: best_run={best_run} "
-              f"(len={len(best_run)}, threshold={threshold})")
-
-        if len(best_run) >= threshold:
-            chapter_position         = i
-            chapter_position_mapping = {doc_idx: val for doc_idx, val in best_run}
-            print(f"[PASS2] ✅ Winning depth: {i}, mapping: {chapter_position_mapping}")
-            break
-        else:
-            print(f"[PASS2] depth {i}: best run too short, continuing to next depth")
-
-    if chapter_position is None:
-        print("[PASS2] ❌ No valid chapter sequence found across any depth")
+    # chapter_map: candidate_doc_idx → (chapter_number, seq_idx)
+    chapter_map = {}
+    for seq_idx, seq in enumerate(sequences):
+        for cand_idx, ch_num in zip(seq['doc_indices'], seq['chapter_numbers']):
+            chapter_map[cand_idx] = (ch_num, seq_idx)
 
     # =========================================================================
-    # PASS 3 — Assign chapter numbers using all methods.
+    # PASS 3 — Assign chapter numbers.
     # =========================================================================
-    chapters      = []
-    seen_chapters = set()
+    raw_chapters = []  # (seq_idx, chapter_dict)
 
-    for doc in candidate_docs:
+    for cand_idx, doc in enumerate(candidate_docs):
         item           = doc['item']
         soup           = doc['soup']
         text           = doc['text']
         filename_lower = item.get_name().lower()
         chapter_number = None
+        seq_idx        = None
         title          = item.get_name()
 
         # Method 1: Filename patterns
@@ -414,37 +635,65 @@ def extract_chapters_from_epub(epub_path: str) -> list:
                     break
 
         # Method 4: Cross-document sequence validation
-        if chapter_number is None and chapter_position is not None:
-            doc_idx = candidate_docs.index(doc)
-            if doc_idx in chapter_position_mapping:
-                chapter_number = chapter_position_mapping[doc_idx]
+        if cand_idx in chapter_map:
+            seq_ch_num, seq_idx = chapter_map[cand_idx]
+            if chapter_number is None:
+                chapter_number = seq_ch_num
+            # Always take seq_idx from the map for correct section grouping
 
         if chapter_number is None:
             continue
 
-        # Extract title from first heading if available
+        # Extract title from first heading
         heading = soup.find(['h1', 'h2', 'h3'])
         if heading:
-            heading_text = heading.get_text(strip=True)
+            heading_text = heading.get_text().strip()
             if heading_text and len(heading_text) < 100:
                 title = heading_text
 
-        if chapter_number in seen_chapters:
-            print(f"⚠️  Duplicate chapter {chapter_number} found:")
-            print(f"   Filename : {item.get_name()}")
-            print(f"   Title    : {title}")
-            continue
-
-        seen_chapters.add(chapter_number)
-        chapters.append({
+        raw_chapters.append((seq_idx, {
             'chapter_number': chapter_number,
             'title':          title,
             'content':        text,
             'filename':       item.get_name(),
+        }))
+
+    # =========================================================================
+    # PASS 4 — Assign sections and deduplicate.
+    # =========================================================================
+    section_defs   = _assign_sections(candidate_docs, all_docs, sequences)
+    seq_to_section = {s['order'] - 1: s for s in section_defs}
+
+    chapters_by_seq = defaultdict(list)
+    for seq_idx, ch_dict in raw_chapters:
+        key = seq_idx if seq_idx is not None else 0
+        chapters_by_seq[key].append(ch_dict)
+
+    output_sections = []
+    for seq_idx in sorted(chapters_by_seq.keys()):
+        s_def = seq_to_section.get(seq_idx, {
+            'title': '' if len(sequences) <= 1 else f'Part {seq_idx + 1}',
+            'order': seq_idx + 1,
         })
 
-    chapters.sort(key=lambda x: x['chapter_number'])
-    return chapters
+        seen   = set()
+        deduped = []
+        for ch in sorted(chapters_by_seq[seq_idx], key=lambda x: x['chapter_number']):
+            if ch['chapter_number'] in seen:
+                print(f"⚠️  Duplicate ch {ch['chapter_number']} in '{s_def['title']}' "
+                      f"— skipping {ch['filename']}")
+                continue
+            seen.add(ch['chapter_number'])
+            deduped.append(ch)
+
+        output_sections.append({
+            'title':    s_def['title'],
+            'order':    s_def['order'],
+            'chapters': deduped,
+        })
+        print(f"[OUTPUT] Section '{s_def['title']}': {len(deduped)} chapters")
+
+    return {'sections': output_sections}
 
 
 # ==============================================================================
@@ -454,23 +703,35 @@ def extract_chapters_from_epub(epub_path: str) -> list:
 def process_epub_file(epub_id):
     epub_obj = None
     try:
-        epub_obj = EpubFile.objects.get(id=epub_id)
+        epub_obj        = EpubFile.objects.get(id=epub_id)
         epub_obj.status = 'pr'
         epub_obj.save()
 
-        file_path = epub_obj.file.path
+        result        = extract_chapters_from_epub(epub_obj.file.path)
+        sections_data = result['sections']
 
-        chapters_data = extract_chapters_from_epub(file_path)
+        for section_data in sections_data:
+            # Only create a Section row when there is a real title.
+            # A flat book (single section, empty title) stores chapters with
+            # section=None, matching the null=True, blank=True on Chapter.section.
+            section_obj = None
+            if section_data['title']:
+                section_obj = Section.objects.create(
+                    epub=epub_obj,
+                    title=section_data['title'],
+                    order=section_data['order'],
+                )
 
-        for chapter_data in chapters_data:
-            Chapter.objects.create(
-                epub=epub_obj,
-                title=chapter_data['title'],
-                content=chapter_data['content'],
-                chapter_number=chapter_data['chapter_number'],
-            )
+            for chapter_data in section_data['chapters']:
+                Chapter.objects.create(
+                    epub=epub_obj,
+                    section=section_obj,
+                    title=chapter_data['title'],
+                    content=chapter_data['content'],
+                    chapter_number=chapter_data['chapter_number'],
+                )
 
-        epub_obj.status = 'c'
+        epub_obj.status    = 'c'
         epub_obj.processed = True
         epub_obj.save()
 
@@ -478,7 +739,7 @@ def process_epub_file(epub_id):
 
     except Exception as e:
         if epub_obj:
-            epub_obj.status = 'f'
+            epub_obj.status        = 'f'
             epub_obj.error_message = str(e)
             epub_obj.save()
         raise
