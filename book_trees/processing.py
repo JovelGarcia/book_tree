@@ -436,6 +436,8 @@ Instructions:
 5. Return ONLY valid JSON, no other text
 """
 
+    content = None
+
     try:
         # Call Gemini 2.5 Flash-Lite API with retry logic
         response = make_api_request_with_retry(
@@ -449,7 +451,7 @@ Instructions:
                 }],
                 "generationConfig": {
                     "temperature": 0.3,
-                    "maxOutputTokens": 2048,
+                    "maxOutputTokens": 8192,  # Increased from 2048 to prevent truncated JSON
                     "responseMimeType": "application/json"  # Forces JSON output
                 }
             }
@@ -482,7 +484,46 @@ Instructions:
         return []
     except json.JSONDecodeError as e:
         print(f"Failed to parse JSON response: {e}")
-        print(f"Response content: {content}")
+        if content is None:
+            print("No content was received from the API")
+            return []
+
+        # Attempt recovery: strip markdown code fences the model may have added
+        # despite responseMimeType, then retry parsing
+        try:
+            cleaned = re.sub(r'^```(?:json)?\s*', '', content.strip())
+            cleaned = re.sub(r'\s*```$', '', cleaned).strip()
+            parsed_data = json.loads(cleaned)
+            relationships = parsed_data.get('relationships', [])
+            for rel in relationships:
+                rel['chapter_number'] = chunk_data.get('chapter_number')
+            print(f"  ↳ Recovered after stripping code fences ({len(relationships)} relationships)")
+            return relationships
+        except json.JSONDecodeError:
+            pass
+
+        # If the JSON is truncated (most likely cause), try to salvage any complete
+        # relationship objects that appeared before the cut-off point
+        try:
+            # Find all complete {...} objects inside the "relationships" array
+            partial_matches = re.findall(r'\{[^{}]+\}', content)
+            recovered = []
+            for match in partial_matches:
+                try:
+                    obj = json.loads(match)
+                    # Only keep objects that look like relationship entries
+                    if 'character_1' in obj and 'character_2' in obj and 'relationship_type' in obj:
+                        obj['chapter_number'] = chunk_data.get('chapter_number')
+                        recovered.append(obj)
+                except json.JSONDecodeError:
+                    continue
+            if recovered:
+                print(f"  ↳ Partially recovered {len(recovered)} relationships from truncated response")
+                return recovered
+        except Exception:
+            pass
+
+        print(f"  ↳ Could not recover — skipping chunk. Raw content preview: {content[:200]}")
         return []
     except Exception as e:
         print(f"Unexpected error in LLM analysis: {e}")
@@ -928,14 +969,20 @@ def process_book_complete(epub_id, api_key):
 
     return {
         'chapters': Chapter.objects.filter(epub_id=epub_id).count(),
+        # Keys expected by the management command
+        'original_characters': extraction_stats['raw_entities'],
+        'final_characters': validation_stats['final_count'],
+        'character_reduction': extraction_stats['raw_entities'] - validation_stats['final_count'],
+        'invalid_removed': validation_stats.get('invalid_count', 0),
+        'groups_merged': validation_stats.get('merged_count', 0),
+        'relationships': rel_count,
+        # Legacy keys kept for any other callers
         'raw_entities': extraction_stats['raw_entities'],
         'pre_filtered': extraction_stats['filtered_out'],
         'after_pre_filter': extraction_stats['unique_characters'],
         'llm_invalid_removed': validation_stats.get('invalid_count', 0),
         'llm_groups_merged': validation_stats.get('merged_count', 0),
-        'final_characters': validation_stats['final_count'],
         'total_reduction': extraction_stats['raw_entities'] - validation_stats['final_count'],
-        'relationships': rel_count
     }
 
 
