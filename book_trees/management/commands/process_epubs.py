@@ -24,7 +24,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 from django.conf import settings
-from book_trees.models import EpubFile, Character, Chapter, Relationship
+from book_trees.models import EpubFile, Character, Chapter, Relationship, Section
 from book_trees.processing import (
     process_epub_file,
     extract_characters_with_chunks,
@@ -179,6 +179,7 @@ class Command(BaseCommand):
                     Relationship.objects.filter(epub=epub).delete()
                     Character.objects.filter(epub=epub).delete()
                     Chapter.objects.filter(epub=epub).delete()
+                    Section.objects.filter(epub=epub).delete()
                     epub.status = 'p'
                     epub.save()
 

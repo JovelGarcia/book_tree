@@ -89,7 +89,7 @@ def _is_section_title_doc(soup: BeautifulSoup) -> Optional[str]:
         candidates = [h.get_text().strip() for h in headings]
     else:
         # Short doc with no headings — check all leaf nodes
-        text = soup.get_text(' ').strip()
+        text = soup.get_text(separator=' ').strip()
         if len(text) < 200:
             for tag in soup.find_all(True):
                 if tag.find(True):
@@ -196,7 +196,15 @@ def identify_landmarks(all_docs: list) -> list:
             doc['landmark'] = lm
             first_back_idx  = i
         elif len(text) >= 300:
-            break   # Substantial non-back-matter content — stop
+            # Peek forward: if the doc immediately after this one is already
+            # a confirmed back-matter landmark, keep scanning past this
+            # chapter — it's the last chapter before the back matter.
+            next_is_back = (
+                i + 1 < n and all_docs[i + 1]['landmark'] is not None
+                and all_docs[i + 1]['landmark'] in set(BACK_MATTER_LANDMARKS.keys()) | {'separator', 'back_matter_content'}
+            )
+            if not next_is_back:
+                break
         # Short/empty doc — keep scanning
 
     # ---- Gap-fill: short docs sandwiched between back-matter docs -----------
@@ -208,6 +216,41 @@ def identify_landmarks(all_docs: list) -> list:
             text = all_docs[i]['soup'].get_text().strip()
             if len(text) < 100:
                 all_docs[i]['landmark'] = 'separator'
+
+    # ---- Forward scan: back-matter landmarks embedded in book content --------
+    # The backward scan only works outward from the end of the spine, so it
+    # misses back-matter section headers (e.g. "APPENDIXES") that sit in the
+    # middle of the spine surrounded by substantive chapter content.  Here we
+    # do one forward pass through the tentative book-content zone and check
+    # every short doc (< 200 chars) for back-matter keywords.  When found, we
+    # tag it AND every document after it as back matter, then update
+    # first_back_idx so the section-title detection below uses the tighter zone.
+    _tentative_book_start = last_front_idx + 1
+    _tentative_book_end   = (first_back_idx - 1) if first_back_idx < n else (n - 1)
+
+    for i in range(_tentative_book_start, _tentative_book_end + 1):
+        doc  = all_docs[i]
+        if doc['landmark'] is not None:
+            continue
+        text = doc['soup'].get_text().strip()
+        if len(text) >= 200:
+            continue  # Too long to be a pure section-header; skip
+        # Use depth_limit=1.0 so even the very last leaf element is checked —
+        # short docs often have their only text node deep in a nested <span>.
+        lm = _doc_landmark_type(doc['soup'], BACK_MATTER_LANDMARKS, depth_limit=1.0)
+        if lm:
+            doc['landmark'] = lm
+            first_back_idx  = i
+            print(f"[LANDMARK] Back-matter heading found inside book zone at "
+                  f"doc[{i:03d}] {doc['item'].get_name()} — '{lm}' ({len(text)} chars); "
+                  f"tagging all subsequent docs as back matter")
+            # Propagate: everything after this heading is back matter too.
+            for j in range(i + 1, n):
+                if all_docs[j]['landmark'] is None:
+                    lm_j = _doc_landmark_type(all_docs[j]['soup'],
+                                              BACK_MATTER_LANDMARKS, depth_limit=1.0)
+                    all_docs[j]['landmark'] = lm_j if lm_j else 'back_matter_content'
+            break  # Only the first such heading matters
 
     # ---- Section title detection (inside book content only) ----------------
     book_start = last_front_idx + 1
@@ -234,7 +277,7 @@ def _book_content_bounds(all_docs: list) -> tuple:
     n = len(all_docs)
 
     FRONT_MATTER_TYPES = set(FRONT_MATTER_LANDMARKS.keys()) | AMBIGUOUS_LANDMARKS
-    BACK_MATTER_TYPES  = set(BACK_MATTER_LANDMARKS.keys())  | {'separator'}
+    BACK_MATTER_TYPES  = set(BACK_MATTER_LANDMARKS.keys())  | {'separator', 'back_matter_content'}
 
     # Walk forward
     start_idx = 0
@@ -271,18 +314,100 @@ def _book_content_bounds(all_docs: list) -> tuple:
 # SEQUENCE DETECTION  (multi-section aware)
 # ==============================================================================
 
-def _find_chapter_sequences(candidate_docs: list) -> list:
+def _positional_sequences(candidate_docs: list, all_docs: list) -> list:
+    """
+    Positional fallback: when no number_candidates sequence can be found,
+    use section-title boundaries (already detected in all_docs) to slice
+    candidate_docs into groups and number each group 1, 2, 3, ...
+
+    Each group spans from one section-title doc (exclusive) to the next
+    section-title doc (exclusive), or to the end of the candidate list.
+
+    Returns the same sequence-dict format as _find_chapter_sequences.
+    """
+    # Collect global indices of section-title docs, in order
+    section_global_indices = [
+        g_idx for g_idx, doc in enumerate(all_docs)
+        if doc.get('section_title') is not None
+    ]
+
+    # Build a map: candidate_doc_idx → global_idx
+    cand_to_global = {}
+    cand_ptr = 0
+    for g_idx, doc in enumerate(all_docs):
+        if cand_ptr < len(candidate_docs) and doc is candidate_docs[cand_ptr]:
+            cand_to_global[cand_ptr] = g_idx
+            cand_ptr += 1
+
+    global_to_cand = {v: k for k, v in cand_to_global.items()}
+
+    if not section_global_indices:
+        # No sections detected — treat the entire candidate list as one group
+        substantive = [
+            i for i, d in enumerate(candidate_docs)
+            if len(d.get('text', '').strip()) >= 50
+        ]
+        if not substantive:
+            return []
+        print(f"[PASS2-POS] No sections — assigning {len(substantive)} chapters positionally")
+        return [{
+            'doc_indices':         substantive,
+            'chapter_numbers':     list(range(1, len(substantive) + 1)),
+            'start_candidate_idx': substantive[0],
+            'end_candidate_idx':   substantive[-1],
+        }]
+
+    # Build boundary pairs: (start_global_excl, end_global_excl)
+    # Each section starts just after a section-title doc and ends just before
+    # the next one (or at the end of all_docs).
+    boundaries = []
+    for s_idx, g_start in enumerate(section_global_indices):
+        g_end = section_global_indices[s_idx + 1] if s_idx + 1 < len(section_global_indices) else len(all_docs)
+        boundaries.append((g_start + 1, g_end))   # exclusive on both ends
+
+    sequences = []
+    for sec_idx, (g_start, g_end) in enumerate(boundaries):
+        # Find candidate docs whose global index falls within [g_start, g_end)
+        group = [
+            cand_idx for cand_idx, g_idx in cand_to_global.items()
+            if g_start <= g_idx < g_end
+        ]
+        # Filter to substantive docs only (skip gap placeholders)
+        group = [
+            i for i in group
+            if len(candidate_docs[i].get('text', '').strip()) >= 50
+        ]
+        if not group:
+            print(f"[PASS2-POS] Section {sec_idx + 1}: no substantive docs found, skipping")
+            continue
+
+        group.sort()
+        chapter_numbers = list(range(1, len(group) + 1))
+        print(f"[PASS2-POS] Section {sec_idx + 1}: {len(group)} chapters assigned positionally")
+        sequences.append({
+            'doc_indices':         group,
+            'chapter_numbers':     chapter_numbers,
+            'start_candidate_idx': group[0],
+            'end_candidate_idx':   group[-1],
+        })
+
+    return sequences
+
+
+def _find_chapter_sequences(candidate_docs: list, all_docs: list) -> list:
     """
     Find all valid sequential chapter-number runs across candidate_docs.
+
+    Primary method: cross-document number_candidates sequence validation.
+    Fallback: positional assignment using section-title boundaries when no
+    numeric sequences are found (e.g. books with no chapter numbers in HTML).
 
     For each depth position in number_candidates:
       - Build sequential runs (consecutive values with correct gaps).
       - Accept runs of length ≥ MIN_RUN_LENGTH (3).
       - Collect ALL non-overlapping runs at that depth.
 
-    The depth with the greatest total doc coverage wins.  This naturally
-    handles multi-section books where chapter numbering restarts (Book 1:
-    chapters 1-12, Book 2: chapters 1-10 → two runs at the same depth).
+    The depth with the greatest total doc coverage wins.
 
     Returns a list of sequence dicts:
       {
@@ -350,23 +475,23 @@ def _find_chapter_sequences(candidate_docs: list) -> list:
             best_depth      = depth
             best_depth_runs = runs
 
-    if not best_depth_runs:
-        print("[PASS2] ❌ No valid chapter sequences found")
-        return []
+    if best_depth_runs:
+        print(f"\n[PASS2] ✅ Best depth: {best_depth}, "
+              f"runs: {[len(r) for r in best_depth_runs]} "
+              f"(total {sum(len(r) for r in best_depth_runs)} chapters)\n")
+        return [
+            {
+                'doc_indices':         [idx for idx, _ in run],
+                'chapter_numbers':     [val for _, val in run],
+                'start_candidate_idx': run[0][0],
+                'end_candidate_idx':   run[-1][0],
+            }
+            for run in best_depth_runs
+        ]
 
-    print(f"\n[PASS2] ✅ Best depth: {best_depth}, "
-          f"runs: {[len(r) for r in best_depth_runs]} "
-          f"(total {sum(len(r) for r in best_depth_runs)} chapters)\n")
-
-    return [
-        {
-            'doc_indices':         [idx for idx, _ in run],
-            'chapter_numbers':     [val for _, val in run],
-            'start_candidate_idx': run[0][0],
-            'end_candidate_idx':   run[-1][0],
-        }
-        for run in best_depth_runs
-    ]
+    # ---- Positional fallback ------------------------------------------------
+    print("[PASS2] ❌ No numeric sequences found — falling back to positional assignment")
+    return _positional_sequences(candidate_docs, all_docs)
 
 
 # ==============================================================================
@@ -489,7 +614,7 @@ def extract_chapters_from_epub(epub_path: str) -> dict:
             continue
         content = item.get_content()
         soup    = BeautifulSoup(content, 'html.parser')
-        text    = soup.get_text("\n").strip()
+        text    = soup.get_text(separator="\n").strip()
         all_docs.append({
             'item':          item,
             'soup':          soup,
@@ -577,7 +702,7 @@ def extract_chapters_from_epub(epub_path: str) -> dict:
     # =========================================================================
     # PASS 2 — Multi-run sequence detection.
     # =========================================================================
-    sequences = _find_chapter_sequences(candidate_docs)
+    sequences = _find_chapter_sequences(candidate_docs, all_docs)
 
     # chapter_map: candidate_doc_idx → (chapter_number, seq_idx)
     chapter_map = {}
