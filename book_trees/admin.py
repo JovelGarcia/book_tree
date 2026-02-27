@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import EpubFile, Chapter, Character, Relationship
+from .models import EpubFile, Chapter, Character, Relationship, Section
 import json
 
 
@@ -12,6 +12,13 @@ class EpubFileAdmin(admin.ModelAdmin):
     list_filter =  ['status', 'processed', 'uploaded_at']
     search_fields = ['original_filename']
     readonly_fields = ['uploaded_at']
+
+#SectionAdmin
+@admin.register(Section)
+class SectionAdmin(admin.ModelAdmin):
+    list_display = ['epub', 'title', 'order']
+    list_filter = ['epub']
+    search_fields = ['order', 'title']
 
 
 #ChapterAdmin
