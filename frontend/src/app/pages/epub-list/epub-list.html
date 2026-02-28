@@ -68,7 +68,7 @@
         [style.animation-delay]="i * 40 + 'ms'"
       >
         <span class="index">{{ (i + 1).toString().padStart(2, '0') }}</span>
-        <span class="title">{{ stripExtension(epub.original_filename) }}</span>
+        <a class="title" [routerLink]="['/epubs', epub.id, 'relationships']">{{ stripExtension(epub.original_filename) }}</a>
         <span class="badge badge--{{ epub.status }}">{{ statusLabel(epub.status) }}</span>
       </li>
     </ol>

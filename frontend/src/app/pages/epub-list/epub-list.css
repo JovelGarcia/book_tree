@@ -273,3 +273,18 @@ main {
 .badge--pr { background: #dff0e8; color: #2e6e52; }
 .badge--c  { background: #e8f0df; color: #3a6020; }
 .badge--f  { background: #f0e0de; color: #8a2e2e; }
+
+/* ── Clickable title ── */
+
+a.title {
+  text-decoration: none;
+  color: inherit;
+  transition: color 0.15s;
+}
+
+a.title:hover {
+  color: #5a4a2a;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: #b0a99e;
+}

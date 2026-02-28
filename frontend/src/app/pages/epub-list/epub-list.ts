@@ -1,6 +1,7 @@
 import { Component, OnInit, signal, ElementRef, ViewChild } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { CommonModule } from '@angular/common';
+import { RouterLink } from '@angular/router';
 
 interface EpubFile {
   id: number;
@@ -18,7 +19,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 @Component({
   selector: 'app-epub-list',
-  imports: [CommonModule],
+  imports: [CommonModule, RouterLink],
   templateUrl: './epub-list.html',
   styleUrl: './epub-list.css'
 })
