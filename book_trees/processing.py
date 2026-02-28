@@ -8,6 +8,8 @@ from django.db import transaction
 from .models import EpubFile, Chapter, Character, Relationship
 from .epub_processing import extract_chapters_from_epub, process_epub_file  # noqa: F401
 from typing import List, Dict, Any
+from .post_processing import consolidate_relationships
+
 
 # load NLP
 nlp = spacy.load("en_core_web_lg")
@@ -426,7 +428,7 @@ Instructions:
             "relationship_type": "one of: family, romantic, friend, ally, enemy, mentor, master_servant, other",
             "specific_type": "brother/sister/father/mother/friend/rival/etc",
             "confidence": 0.0-1.0,
-            "evidence": "exact quote or paraphrase from text"
+            "evidence": ""
         }}
     ]
 }}
@@ -474,6 +476,7 @@ Instructions:
         # Add chapter reference to each relationship
         for rel in relationships:
             rel['chapter_number'] = chunk_data.get('chapter_number')
+            rel['evidence'] = chunk_data.get('context')
 
         return relationships
 
@@ -497,6 +500,7 @@ Instructions:
             relationships = parsed_data.get('relationships', [])
             for rel in relationships:
                 rel['chapter_number'] = chunk_data.get('chapter_number')
+                rel['evidence'] = chunk_data.get('context')
             print(f"  ↳ Recovered after stripping code fences ({len(relationships)} relationships)")
             return relationships
         except json.JSONDecodeError:
@@ -514,6 +518,7 @@ Instructions:
                     # Only keep objects that look like relationship entries
                     if 'character_1' in obj and 'character_2' in obj and 'relationship_type' in obj:
                         obj['chapter_number'] = chunk_data.get('chapter_number')
+                        obj['evidence'] = chunk_data.get('context')
                         recovered.append(obj)
                 except json.JSONDecodeError:
                     continue
@@ -966,6 +971,8 @@ def process_book_complete(epub_id, api_key):
     print(f"{'=' * 50}")
     print("✓ Book processing complete!")
     print(f"{'=' * 50}")
+
+    consolidate_stats = consolidate_relationships(epub_id)
 
     return {
         'chapters': Chapter.objects.filter(epub_id=epub_id).count(),

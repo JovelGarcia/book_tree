@@ -92,7 +92,7 @@ class Chapter(models.Model):
 
 
 class Relationship(models.Model):
-    epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE)
+    epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE, related_name='relationships')
     character_1 = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_1')
     character_2 = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_2')
     relationship_type = models.CharField(max_length=100)
