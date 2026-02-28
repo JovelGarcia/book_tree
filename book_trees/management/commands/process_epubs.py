@@ -21,7 +21,7 @@ Usage:
 import zipfile
 from pathlib import Path
 
-
+from book_trees.post_processing import consolidate_relationships
 from django.core.management.base import BaseCommand
 from django.conf import settings
 from book_trees.models import EpubFile, Character, Chapter, Relationship, Section
@@ -71,6 +71,17 @@ class Command(BaseCommand):
             action='store_true',
             help='Extract relationships with LLM (requires API key and characters)',
         )
+        parser.add_argument(
+            '--post-process',
+            action='store_true',
+            help="Combine relationship types"
+        )
+        parser.add_argument(
+            '--view-raw',
+            action='store_true',
+            help='View raw EPUB contents (zip listing + raw XHTML) in terminal',
+        )
+
 
         # Options
         parser.add_argument(
@@ -82,11 +93,6 @@ class Command(BaseCommand):
             '--api-key',
             type=str,
             help='Google API key for LLM-based processing',
-        )
-        parser.add_argument(
-            '--view-raw',
-            action='store_true',
-            help='View raw EPUB contents (zip listing + raw XHTML) in terminal',
         )
 
     def handle(self, *args, **options):
@@ -193,6 +199,8 @@ class Command(BaseCommand):
                     self.stdout.write(f"  Invalid removed: {stats['invalid_removed']}")
                     self.stdout.write(f"  Groups merged: {stats['groups_merged']}")
                     self.stdout.write(f"  Relationships: {stats['relationships']}")
+                    # TODO: Relationships merged post processing
+
                     success_count += 1
 
                 # Individual processing steps
@@ -250,6 +258,20 @@ class Command(BaseCommand):
                                 f"✓ Found {rel_count} relationships"
                             ))
                             step_count += 1
+
+                    if options.get('post_process'):
+                        if not epub.relationships.exists():
+                            self.stdout.write(self.style.WARNING(
+                                "⚠ No relationships found. Run --characters-only first."
+                            ))
+                        self.stdout.write("Processing relationships...")
+                        success = consolidate_relationships(epub.id)
+                        if success:
+                            relationship_count = epub.relationships.count()
+                            self.stdout.write(self.style.SUCCESS(f"✓ Consolidated to {relationship_count} relationships"))
+                            step_count += 1
+                        else:
+                            raise Exception("Relationship consolidation failed")
 
                     if step_count > 0:
                         success_count += 1
