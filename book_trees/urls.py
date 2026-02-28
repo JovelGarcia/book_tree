@@ -5,6 +5,14 @@ from . import views
 
 urlpatterns = [
     path('api/epubs/', views.epub_list_api),
+    path('api/epubs/upload/', views.epub_upload_api),        # upload before <int:id>
     path('api/epubs/<int:id>/', views.epub_api),
-    path('api/epubs/upload/', views.epub_upload_api),
+
+    # Characters
+    path('api/epubs/<int:epub_id>/characters/', views.character_list_api),
+    path('api/epubs/<int:epub_id>/characters/<int:character_id>/', views.character_detail_api),
+
+    # Relationships
+    path('api/epubs/<int:epub_id>/relationships/', views.relationship_list_api),
+    path('api/epubs/<int:epub_id>/relationships/<int:relationship_id>/', views.relationship_detail_api),
 ]
