@@ -82,7 +82,7 @@ class ChapterAdmin(admin.ModelAdmin):
 #CharacterAdmin
 @admin.register(Character)
 class CharacterAdmin(admin.ModelAdmin):
-    list_display = ['name', 'aliases', 'mention_count', 'first_appearance_chapter']
+    list_display = ['name', 'syntactic_score', 'aliases', 'mention_count', 'first_appearance_chapter']
     list_filter = ['epub']
     search_fields = ['name', 'aliases']
     readonly_fields = ['epub']

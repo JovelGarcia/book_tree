@@ -45,6 +45,7 @@ class Section(models.Model):
 class Character(models.Model):
     epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE, related_name='characters')
     name = models.CharField(max_length=200)
+    syntactic_score = models.IntegerField(default=0)
     aliases = models.JSONField(default=list)
     mention_count = models.IntegerField(default=0)
     first_appearance_chapter = models.IntegerField(null=True)

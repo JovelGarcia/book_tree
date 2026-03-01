@@ -218,6 +218,7 @@ class Command(BaseCommand):
                             raise Exception("Chapter extraction failed")
 
                     if options.get('characters_only'):
+                        process_epub_file(epub.id)
                         if not epub.chapters.exists():
                             self.stdout.write(self.style.WARNING(
                                 "⚠ No chapters found. Run --chapters-only first."
