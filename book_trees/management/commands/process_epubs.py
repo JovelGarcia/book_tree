@@ -16,6 +16,9 @@ Usage:
 
     # Reprocess all EPUBs
     python3 manage.py process_epubs --reprocess --full --api-key YOUR_API_KEY
+
+    # Dry run (process but do not save anything to the database)
+    python3 manage.py process_epubs --full --no-save --api-key YOUR_API_KEY
 """
 
 import zipfile
@@ -24,6 +27,7 @@ from pathlib import Path
 from book_trees.post_processing import consolidate_relationships
 from django.core.management.base import BaseCommand
 from django.conf import settings
+from django.db import transaction
 from book_trees.models import EpubFile, Character, Chapter, Relationship, Section
 from book_trees.processing import (
     process_epub_file,
@@ -31,6 +35,10 @@ from book_trees.processing import (
     extract_relationships_with_llm,
     process_book_complete
 )
+
+
+class _RollbackDryRun(Exception):
+    """Sentinel exception used to roll back a dry-run transaction."""
 
 
 class Command(BaseCommand):
@@ -76,7 +84,6 @@ class Command(BaseCommand):
             help='View raw EPUB contents (zip listing + raw XHTML) in terminal',
         )
 
-
         # Options
         parser.add_argument(
             '--reprocess',
@@ -88,8 +95,32 @@ class Command(BaseCommand):
             type=str,
             help='Google API key for LLM-based processing',
         )
+        parser.add_argument(
+            '--no-save',
+            action='store_true',
+            help='Run processing but do not save results to the database (dry run)',
+        )
 
     def handle(self, *args, **options):
+        no_save = options.get('no_save')
+
+        if no_save:
+            self.stdout.write(self.style.WARNING(
+                "⚠ Dry-run mode: all processing will run inside a transaction "
+                "that is rolled back at the end — nothing will be saved.\n"
+            ))
+            try:
+                with transaction.atomic():
+                    self._handle(*args, **options)
+                    raise _RollbackDryRun
+            except _RollbackDryRun:
+                self.stdout.write(self.style.WARNING(
+                    "\n⚠ Dry-run complete: transaction rolled back, database unchanged."
+                ))
+        else:
+            self._handle(*args, **options)
+
+    def _handle(self, *args, **options):
         epub_id = options.get('epub_id')
         reprocess = options.get('reprocess')
         api_key = options.get('api_key') or getattr(settings, 'GOOGLE_API_KEY', None)
