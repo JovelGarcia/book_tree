@@ -28,7 +28,6 @@ from book_trees.models import EpubFile, Character, Chapter, Relationship, Sectio
 from book_trees.processing import (
     process_epub_file,
     extract_characters_with_chunks,
-    validate_and_deduplicate_characters_with_llm,
     extract_relationships_with_llm,
     process_book_complete
 )
@@ -60,11 +59,6 @@ class Command(BaseCommand):
             '--characters-only',
             action='store_true',
             help='Extract characters with NER (requires chapters to exist)',
-        )
-        parser.add_argument(
-            '--validate-characters',
-            action='store_true',
-            help='Validate and deduplicate characters with LLM (requires API key)',
         )
         parser.add_argument(
             '--relationships-only',
@@ -229,22 +223,6 @@ class Command(BaseCommand):
                             self.stdout.write(self.style.SUCCESS(
                                 f"✓ Found {char_count} potential character names"
                             ))
-                            step_count += 1
-
-                    if options.get('validate_characters'):
-                        if not epub.characters.exists():
-                            self.stdout.write(self.style.WARNING(
-                                "⚠ No characters found. Run --characters-only first."
-                            ))
-                        else:
-                            self.stdout.write("Validating and deduplicating characters with LLM...")
-                            stats = validate_and_deduplicate_characters_with_llm(epub.id, api_key)
-                            self.stdout.write(self.style.SUCCESS(
-                                f"✓ Characters: {stats['original_count']} → {stats['final_count']} "
-                                f"({stats['reduction']})"
-                            ))
-                            self.stdout.write(f"  Invalid removed: {stats.get('invalid_count', 0)}")
-                            self.stdout.write(f"  Groups merged: {stats.get('merged_count', 0)}")
                             step_count += 1
 
                     if options.get('relationships_only'):
