@@ -6,6 +6,7 @@ import time
 from django.db import transaction
 from .models import EpubFile, Chapter, Character, Relationship
 from .epub_processing import extract_chapters_from_epub, process_epub_file  # noqa: F401
+from collections import defaultdict
 from typing import List, Dict, Any
 from .post_processing import consolidate_relationships
 from .pre_processing import run_pre_processing
@@ -342,34 +343,53 @@ def extract_characters_with_chunks(epub_id):
     }
 
 
-def analyze_chunk_with_llm(chunk_data: Dict[str, Any], api_key: str = None) -> List[Dict]:
+def analyze_chunks_batch_with_llm(chunks: List[Dict[str, Any]], api_key: str = None) -> List[Dict]:
     """
-    Sends a chunk with 2+ characters to Gemini 2.5 Flash-Lite for relationship analysis.
+    Sends a batch of chunks that all share the same character set to Gemini
+    2.5 Flash-Lite for relationship analysis in a single API request.
+
+    Grouping chunks by character pair reduces API calls significantly: instead
+    of one request per sentence chunk, we make one request per unique character
+    pair combination found across all chunks.
 
     Args:
-        chunk_data: Dictionary containing:
-            - context: str - The text chunk
-            - characters_in_context: List[str] - Character names mentioned
+        chunks: List of chunk dicts, each containing:
+            - context: str - The text excerpt
+            - characters_in_context: List[str] - Character names (same across batch)
             - chapter_number: int - Chapter number for reference
         api_key: Google API Key
 
     Returns:
-        List of relationship dictionaries extracted from the LLM response
+        List of relationship dictionaries extracted from the LLM response,
+        each annotated with chapter_number and evidence from its source chunk.
     """
-
-    if len(chunk_data.get('characters_in_context', [])) < 2:
+    if not chunks:
         return []
 
-    prompt = f"""Analyze the following text excerpt and identify relationships between characters.
+    # All chunks in the batch share the same characters (enforced by the
+    # grouping logic in extract_relationships_with_llm), so we read them
+    # from the first chunk.
+    characters = chunks[0].get('characters_in_context', [])
+    if len(characters) < 2:
+        return []
 
-Text excerpt:
-{chunk_data['context']}
+    # Build a numbered list of excerpts so the LLM can reference them
+    excerpts_text = "\n\n".join(
+        f"Excerpt {i + 1} (Chapter {chunk.get('chapter_number', '?')}):\n{chunk['context']}"
+        for i, chunk in enumerate(chunks)
+    )
 
-Characters mentioned: {', '.join(chunk_data['characters_in_context'])}
+    prompt = f"""Analyze the following text excerpts and identify relationships between characters.
+All excerpts feature the same characters, so consider them together as a body of evidence.
+
+{excerpts_text}
+
+Characters mentioned: {', '.join(characters)}
 
 Instructions:
 1. Identify EXPLICIT relationships only (stated or strongly implied in the text)
-2. Return relationships as JSON in this exact format:
+2. Consolidate evidence across excerpts — return one relationship entry per unique character pair + type
+3. Return relationships as JSON in this exact format:
 {{
     "relationships": [
         {{
@@ -378,14 +398,14 @@ Instructions:
             "relationship_type": "one of: family, romantic, friend, ally, enemy, mentor, master_servant, other",
             "specific_type": "brother/sister/father/mother/friend/rival/etc",
             "confidence": 0.0-1.0,
-            "evidence": ""
+            "evidence": "brief quote or summary from any excerpt"
         }}
     ]
 }}
 
-3. Use exact character names as they appear in the "Characters mentioned" list
-4. Be specific: prefer "brother" over just "family"
-5. Return ONLY valid JSON, no other text
+4. Use exact character names as they appear in the "Characters mentioned" list
+5. Be specific: prefer "brother" over just "family"
+6. Return ONLY valid JSON, no other text
 """
 
     content = None
@@ -417,9 +437,12 @@ Instructions:
         parsed_data = json.loads(content)
         relationships = parsed_data.get('relationships', [])
 
+        # Annotate each relationship with the chapter of the first chunk in the
+        # batch (consistent with the previous single-chunk behaviour).
         for rel in relationships:
-            rel['chapter_number'] = chunk_data.get('chapter_number')
-            rel['evidence'] = chunk_data.get('context')
+            rel['chapter_number'] = chunks[0].get('chapter_number')
+            # Use all excerpts concatenated as the evidence context
+            rel['evidence'] = " | ".join(c['context'] for c in chunks)
 
         return relationships
 
@@ -441,8 +464,8 @@ Instructions:
             parsed_data = json.loads(cleaned)
             relationships = parsed_data.get('relationships', [])
             for rel in relationships:
-                rel['chapter_number'] = chunk_data.get('chapter_number')
-                rel['evidence'] = chunk_data.get('context')
+                rel['chapter_number'] = chunks[0].get('chapter_number')
+                rel['evidence'] = " | ".join(c['context'] for c in chunks)
             print(f"  ↳ Recovered after stripping code fences ({len(relationships)} relationships)")
             return relationships
         except json.JSONDecodeError:
@@ -456,8 +479,8 @@ Instructions:
                 try:
                     obj = json.loads(match)
                     if 'character_1' in obj and 'character_2' in obj and 'relationship_type' in obj:
-                        obj['chapter_number'] = chunk_data.get('chapter_number')
-                        obj['evidence'] = chunk_data.get('context')
+                        obj['chapter_number'] = chunks[0].get('chapter_number')
+                        obj['evidence'] = " | ".join(c['context'] for c in chunks)
                         recovered.append(obj)
                 except json.JSONDecodeError:
                     continue
@@ -467,7 +490,7 @@ Instructions:
         except Exception:
             pass
 
-        print(f"  ↳ Could not recover — skipping chunk. Raw content preview: {content[:200]}")
+        print(f"  ↳ Could not recover — skipping batch. Raw content preview: {content[:200]}")
         return []
     except Exception as e:
         print(f"Unexpected error in LLM analysis: {e}")
@@ -536,10 +559,16 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
     """
     Extract relationships from an EPUB using LLM analysis on sentence chunks.
 
+    Chunks are grouped by their sorted character-pair key so that all sentences
+    featuring the same pair of characters are sent to the LLM in a single
+    batched request. This significantly reduces the total number of API calls
+    compared to the previous one-chunk-per-request approach.
+
     Args:
         epub_id: ID of the EpubFile to process
         api_key: API key for the LLM service
-        batch_size: Number of chunks to process at once (for rate limiting)
+        batch_size: Maximum number of chunks to include in a single LLM request
+                    (guards against excessively long prompts)
 
     Returns:
         Number of relationships found
@@ -547,22 +576,31 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
     epub = EpubFile.objects.get(id=epub_id)
     chapters = epub.chapters.all()
 
-    all_relationships = []
+    # ── Collect all valid chunks across every chapter ────────────────────────
+    # Key: frozenset of character names -> list of chunk dicts
+    chunks_by_character_pair: Dict[frozenset, List[Dict[str, Any]]] = defaultdict(list)
 
     for chapter in chapters:
-        chunks = chapter.annotated_sentences or []
-
-        for chunk in chunks:
-            # Sentence chunks already guarantee 2+ characters, but guard anyway
-            if len(chunk.get('characters_in_context', [])) < 2:
+        for chunk in (chapter.annotated_sentences or []):
+            characters = chunk.get('characters_in_context', [])
+            if len(characters) < 2:
                 continue
+            chunk_with_chapter = {**chunk, 'chapter_number': chapter.chapter_number}
+            pair_key = frozenset(characters)
+            chunks_by_character_pair[pair_key].append(chunk_with_chapter)
 
-            chunk_with_chapter = {
-                **chunk,
-                'chapter_number': chapter.chapter_number,
-            }
+    total_groups = len(chunks_by_character_pair)
+    total_chunks = sum(len(v) for v in chunks_by_character_pair.values())
+    print(f"Grouped {total_chunks} chunks into {total_groups} unique character-pair groups")
 
-            relationships = analyze_chunk_with_llm(chunk_with_chapter, api_key)
+    # ── Send one (or a few) LLM request(s) per character-pair group ─────────
+    all_relationships = []
+
+    for pair_key, group_chunks in chunks_by_character_pair.items():
+        # Split very large groups into sub-batches to avoid oversized prompts
+        for batch_start in range(0, len(group_chunks), batch_size):
+            batch = group_chunks[batch_start: batch_start + batch_size]
+            relationships = analyze_chunks_batch_with_llm(batch, api_key)
             all_relationships.extend(relationships)
 
     relationships_found = 0
