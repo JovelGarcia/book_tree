@@ -4,11 +4,9 @@
   max-width: 960px;
   margin: 0 auto;
   padding: 0 2rem 4rem;
-  background: #f7f4ef;
+  background: #ffffff;
   min-height: 100vh;
 }
-
-/* ── Header ── */
 
 header {
   display: flex;
@@ -55,8 +53,6 @@ h1 {
   text-transform: uppercase;
 }
 
-/* ── Legend ── */
-
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -84,11 +80,7 @@ h1 {
   flex-shrink: 0;
 }
 
-/* ── States ── */
-
-main {
-  padding-top: 0.5rem;
-}
+main { padding-top: 0.5rem; }
 
 .state-msg {
   font-family: 'DM Mono', monospace;
@@ -100,32 +92,27 @@ main {
 
 .state-msg.error { color: #b94a3a; }
 
-.pulse {
-  animation: pulse 1.4s ease-in-out infinite;
-}
+.pulse { animation: pulse 1.4s ease-in-out infinite; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.25; }
 }
 
-/* ── Graph ── */
-
 .graph-wrap {
   position: relative;
   margin-top: 1rem;
   border: 1px solid #e8e3da;
   border-radius: 4px;
-  background: #faf8f4;
+  background: #ffffff;
   overflow: hidden;
 }
 
 .graph-svg {
   display: block;
   width: 100%;
+  background: #ffffff;
 }
-
-/* ── Tooltip ── */
 
 .tooltip {
   position: absolute;
