@@ -133,11 +133,6 @@ export class EpubRelationships implements OnInit, AfterViewInit {
 
     const nodes = Array.from(nodeMap.values());
     const maxDeg = Math.max(...nodes.map(n => n.degree), 1);
-    const types = [...new Set(this.data.map(r => r.relationship_type))];
-
-    // Connected component IDs — used to keep isolated nodes nearby-but-separate
-    const adjSet = new Set(links.flatMap(l => [l.char1, l.char2]));
-    const isIsolated = (n: GraphNode) => !adjSet.has(n.id) || n.degree === 0;
 
     const nodeRadius = (d: GraphNode) => 4 + (d.degree / maxDeg) * 13;
 
@@ -155,84 +150,40 @@ export class EpubRelationships implements OnInit, AfterViewInit {
         .on('zoom', (event) => g.attr('transform', event.transform))
     );
 
-    // Default arrow markers — neutral gray
-    const defs = svg.append('defs');
-    defs.selectAll('marker.default')
-      .data(types)
-      .join('marker')
-        .attr('id', t => `arrow-${t}`)
-        .attr('viewBox', '0 -4 8 8')
-        .attr('refX', 22).attr('refY', 0)
-        .attr('markerWidth', 4).attr('markerHeight', 4)
-        .attr('orient', 'auto')
-      .append('path')
-        .attr('d', 'M0,-4L8,0L0,4')
-        .attr('fill', LINK_DEFAULT);
+    // No arrow markers — edges are undirected
 
-    // Hover arrow markers — typed color
-    defs.selectAll('marker.hover')
-      .data(types)
-      .join('marker')
-        .attr('id', t => `arrow-hover-${t}`)
-        .attr('viewBox', '0 -4 8 8')
-        .attr('refX', 22).attr('refY', 0)
-        .attr('markerWidth', 4).attr('markerHeight', 4)
-        .attr('orient', 'auto')
-      .append('path')
-        .attr('d', 'M0,-4L8,0L0,4')
-        .attr('fill', t => TYPE_COLORS[t] ?? TYPE_COLORS['other']);
-
-    // ── Simulation — constellation physics ───────────────────────────────
-    // Key differences from clumping:
-    //   • very high charge so nodes push far apart
-    //   • low link strength so topology spreads rather than retracts
-    //   • very weak center gravity so the graph breathes outward
-    //   • isolated nodes get a gentle nudge toward the periphery
+    // ── Simulation — Obsidian graph view physics ─────────────────────────
+    // Obsidian's graph breathes: clusters form distinct organic shapes,
+    // nodes don't collapse together. Key tuning vs d3 defaults:
+    //   • charge: strong enough repulsion (-160) to create breathing room
+    //   • link: moderate distance (80px) + soft strength (0.4) so clusters
+    //     spread into their own shapes rather than snapping tight
+    //   • center: very weak (0.03) — just anchors the graph, doesn't pull in
+    //   • collision: generous padding keeps labels readable
+    //   • slower cooling (alphaDecay 0.015) gives more time to find natural layout
     const simulation = d3.forceSimulation<GraphNode>(nodes)
       .force('link',
         d3.forceLink<GraphNode, GraphLink>(links)
           .id(d => d.id)
-          .distance(d => {
-            const s = d.source as GraphNode;
-            const t = d.target as GraphNode;
-            // Scale distance with combined degree so hubs sit further from each other
-            return 90 + (s.degree + t.degree) * 12;
-          })
-          .strength(0.18)   // low — lets nodes drift to natural positions
+          .distance(80)      // breathing room between connected nodes
+          .strength(0.4)     // soft pull — clusters spread, not collapse
       )
       .force('charge',
         d3.forceManyBody<GraphNode>()
-          // Hubs repel much more strongly → they become constellation anchor stars
-          .strength(d => -(280 + (d.degree / maxDeg) * 900))
-          .distanceMax(600)
-          .distanceMin(20)
+          .strength(-160)    // strong enough to push clusters apart organically
+          .distanceMax(500)
+          .distanceMin(10)
       )
       .force('center',
-        // Very weak — just enough to keep graph on screen
-        d3.forceCenter(W / 2, H / 2).strength(0.015)
+        d3.forceCenter(W / 2, H / 2).strength(0.25)  // enough to hold isolated nodes near the cluster
       )
       .force('collision',
         d3.forceCollide<GraphNode>()
-          .radius(d => nodeRadius(d) + (isIsolated(d) ? 40 : 22))
-          .strength(0.9)
+          .radius(d => nodeRadius(d) + 12)
+          .strength(0.8)
       )
-      // Peripheral push for isolated nodes — keeps them at edge, not overlapping core
-      .force('isolatedPush', () => {
-        const cx = W / 2, cy = H / 2;
-        for (const n of nodes) {
-          if (isIsolated(n) && n.x != null && n.y != null) {
-            const dx = n.x - cx;
-            const dy = n.y - cy;
-            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-            const targetDist = Math.min(W, H) * 0.38;
-            const push = (targetDist - dist) * -0.008;
-            (n as any).vx += (dx / dist) * push;
-            (n as any).vy += (dy / dist) * push;
-          }
-        }
-      })
-      .alphaDecay(0.025)     // slower cooling → more time to spread out
-      .velocityDecay(0.35);  // moderate damping → nodes glide, not vibrate
+      .alphaDecay(0.015)     // slow cooling — more time to find organic shape
+      .velocityDecay(.85);
 
     // ── Links — flat light gray, colored only on hover ────────────────────
     const link = g.append('g').attr('class', 'links')
@@ -242,13 +193,11 @@ export class EpubRelationships implements OnInit, AfterViewInit {
         .attr('stroke', LINK_DEFAULT)
         .attr('stroke-width', 1.2)
         .attr('stroke-opacity', 1)
-        .attr('marker-end', d => `url(#arrow-${d.type})`)
         .style('cursor', 'pointer')
         .on('mouseenter', (event, d) => {
           d3.select(event.currentTarget)
             .attr('stroke', TYPE_COLORS[d.type] ?? TYPE_COLORS['other'])
-            .attr('stroke-width', 2)
-            .attr('marker-end', `url(#arrow-hover-${d.type})`);
+            .attr('stroke-width', 2);
           const wrap = el.parentElement!.getBoundingClientRect();
           this.zone.run(() => this.tooltip.set({
             visible: true,
@@ -266,8 +215,7 @@ export class EpubRelationships implements OnInit, AfterViewInit {
         .on('mouseleave', (event, d) => {
           d3.select(event.currentTarget)
             .attr('stroke', LINK_DEFAULT)
-            .attr('stroke-width', 1.2)
-            .attr('marker-end', `url(#arrow-${d.type})`);
+            .attr('stroke-width', 1.2);
           this.zone.run(() => this.tooltip.update(t => ({ ...t, visible: false })));
         });
 
@@ -336,11 +284,6 @@ export class EpubRelationships implements OnInit, AfterViewInit {
           )
           .attr('stroke-width', l =>
             (l.source as GraphNode).id === d.id || (l.target as GraphNode).id === d.id ? 2 : 1
-          )
-          .attr('marker-end', l =>
-            (l.source as GraphNode).id === d.id || (l.target as GraphNode).id === d.id
-              ? `url(#arrow-hover-${l.type})`
-              : `url(#arrow-${l.type})`
           );
 
         node.select('circle + circle')  // main circle (second circle)
@@ -353,8 +296,7 @@ export class EpubRelationships implements OnInit, AfterViewInit {
       .on('mouseleave', () => {
         link
           .attr('stroke', LINK_DEFAULT)
-          .attr('stroke-width', 1.2)
-          .attr('marker-end', (l: GraphLink) => `url(#arrow-${l.type})`);
+          .attr('stroke-width', 1.2);
         node.select('circle + circle')
           .attr('stroke-opacity', 0.85);
         node.select('text')
