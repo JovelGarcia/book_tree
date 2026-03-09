@@ -150,40 +150,63 @@ export class EpubRelationships implements OnInit, AfterViewInit {
         .on('zoom', (event) => g.attr('transform', event.transform))
     );
 
-    // No arrow markers — edges are undirected
+// No arrow markers — edges are undirected
 
-    // ── Simulation — Obsidian graph view physics ─────────────────────────
-    // Obsidian's graph breathes: clusters form distinct organic shapes,
-    // nodes don't collapse together. Key tuning vs d3 defaults:
-    //   • charge: strong enough repulsion (-160) to create breathing room
-    //   • link: moderate distance (80px) + soft strength (0.4) so clusters
-    //     spread into their own shapes rather than snapping tight
-    //   • center: very weak (0.03) — just anchors the graph, doesn't pull in
-    //   • collision: generous padding keeps labels readable
-    //   • slower cooling (alphaDecay 0.015) gives more time to find natural layout
-    const simulation = d3.forceSimulation<GraphNode>(nodes)
-      .force('link',
-        d3.forceLink<GraphNode, GraphLink>(links)
-          .id(d => d.id)
-          .distance(80)      // breathing room between connected nodes
-          .strength(0.4)     // soft pull — clusters spread, not collapse
-      )
-      .force('charge',
-        d3.forceManyBody<GraphNode>()
-          .strength(-160)    // strong enough to push clusters apart organically
-          .distanceMax(500)
-          .distanceMin(10)
-      )
-      .force('center',
-        d3.forceCenter(W / 2, H / 2).strength(0.25)  // enough to hold isolated nodes near the cluster
-      )
-      .force('collision',
-        d3.forceCollide<GraphNode>()
-          .radius(d => nodeRadius(d) + 12)
-          .strength(0.8)
-      )
-      .alphaDecay(0.015)     // slow cooling — more time to find organic shape
-      .velocityDecay(.85);
+// ── Simulation — Obsidian graph view physics ─────────────────────────
+// Obsidian's graph breathes: clusters form distinct organic shapes,
+// stray nodes (unlinked or weakly linked) orbit the periphery instead
+// of flying off or collapsing into the center.
+//
+// Key tuning:
+//   • charge: strong repulsion (-300) creates breathing room; distanceMax
+//     capped at 400 so far-flung strays aren't pushed further out
+//   • link: moderate distance (80px) + soft strength (0.4) so clusters
+//     spread into organic shapes rather than snapping tight
+//   • center: very weak (0.03) — just anchors the main cluster, doesn't
+//     drag strays inward
+//   • strayTether: radial force pulls unlinked nodes into a soft orbit
+//     ring around the main cluster — the core of the stray behavior
+//   • collision: generous padding keeps labels readable
+//   • slower cooling (alphaDecay 0.007) gives more time to find natural layout
+//   • lower velocityDecay (0.3) lets nodes drift more fluidly to equilibrium
+
+const linkedNodeIds = new Set(
+  links.flatMap(l => [
+    typeof l.source === 'object' ? l.source.id : l.source,
+    typeof l.target === 'object' ? l.target.id : l.target,
+  ])
+);
+
+const simulation = d3.forceSimulation<GraphNode>(nodes)
+  .force('link',
+    d3.forceLink<GraphNode, GraphLink>(links)
+      .id(d => d.id)
+      .distance(80)      // breathing room between connected nodes
+      .strength(0.4)     // soft pull — clusters spread, not collapse
+  )
+  .force('charge',
+    d3.forceManyBody<GraphNode>()
+      .strength(-300)    // pushes clusters apart organically
+      .distanceMax(400)  // tighter cap — stops strays being booted to infinity
+      .distanceMin(10)
+  )
+  .force('center',
+    d3.forceCenter(W / 2, H / 2).strength(0.08)  // stronger anchor for main cluster
+  )
+  .force('strayTether',
+    d3.forceRadial<GraphNode>(
+      180,
+      W / 2,
+      H / 2
+    ).strength(d => linkedNodeIds.has(d.id) ? 0 : 0.08)  // linked nodes: no radial pull
+  )
+  .force('collision',
+    d3.forceCollide<GraphNode>()
+      .radius(d => nodeRadius(d) + 12)
+      .strength(0.7)     // softer collision — less jitter, more organic settling
+  )
+  .alphaDecay(0.007)     // slow cooling — more time to find organic shape
+  .velocityDecay(0.9);   // lower than before — nodes drift more fluidly to rest
 
     // ── Links — flat light gray, colored only on hover ────────────────────
     const link = g.append('g').attr('class', 'links')

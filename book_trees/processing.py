@@ -694,12 +694,16 @@ def process_book_complete(epub_id, api_key):
 
     return {
         'chapters': Chapter.objects.filter(epub_id=epub_id).count(),
-        # Keys expected by the management command
         'original_characters': extraction_stats['raw_entities'],
+        'final_characters': extraction_stats['unique_characters'],
+        'character_reduction': (
+            f"{extraction_stats['raw_entities'] - extraction_stats['unique_characters']} removed"
+        ),
+        'invalid_removed': extraction_stats.get('filtered_out', 0),
+        'groups_merged': extraction_stats.get('groups_merged', 0),
         'relationships': rel_count,
         # Legacy keys
         'raw_entities': extraction_stats['raw_entities'],
         'pre_filtered': extraction_stats['filtered_out'],
         'after_pre_filter': extraction_stats['pre_filter_unique'],
-
     }
