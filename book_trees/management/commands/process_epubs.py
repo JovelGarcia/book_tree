@@ -11,8 +11,10 @@ Usage:
     # Individual processing steps
     python3 manage.py process_epubs --chapters-only
     python3 manage.py process_epubs --characters-only
-    python3 manage.py process_epubs --validate-characters --api-key YOUR_API_KEY
     python3 manage.py process_epubs --relationships-only --api-key YOUR_API_KEY
+
+    # Continue from a partial run (e.g. after --chapters-only or --characters-only)
+    python3 manage.py process_epubs --epub-id 5 --continue --api-key YOUR_API_KEY
 
     # Reprocess all EPUBs
     python3 manage.py process_epubs --reprocess --full --api-key YOUR_API_KEY
@@ -100,6 +102,16 @@ class Command(BaseCommand):
             action='store_true',
             help='Run processing but do not save results to the database (dry run)',
         )
+        parser.add_argument(
+            '--continue',
+            action='store_true',
+            dest='continue_processing',
+            help=(
+                'Resume a partial run to completion. Detects which steps are already done '
+                '(chapters, characters, relationships) and runs only the remaining ones. '
+                'Requires --api-key because it will proceed through LLM steps if needed.'
+            ),
+        )
 
     def handle(self, *args, **options):
         no_save = options.get('no_save')
@@ -129,7 +141,8 @@ class Command(BaseCommand):
         llm_operations = [
             options.get('validate_characters'),
             options.get('relationships_only'),
-            options.get('full')
+            options.get('full'),
+            options.get('continue_processing'),
         ]
         if any(llm_operations) and not api_key:
             self.stdout.write(self.style.ERROR(
@@ -224,8 +237,11 @@ class Command(BaseCommand):
                     self.stdout.write(f"  Invalid removed: {stats['invalid_removed']}")
                     self.stdout.write(f"  Groups merged: {stats['groups_merged']}")
                     self.stdout.write(f"  Relationships: {stats['relationships']}")
-                    # TODO: Relationships merged post processing
+                    success_count += 1
 
+                # Continue from a partial run
+                elif options.get('continue_processing'):
+                    self._continue_processing(epub, api_key)
                     success_count += 1
 
                 # Individual processing steps
@@ -287,7 +303,7 @@ class Command(BaseCommand):
                         success_count += 1
                     elif step_count == 0:
                         self.stdout.write(self.style.WARNING(
-                            "No processing steps specified. Use --full or specific step flags."
+                            "No processing steps specified. Use --full, --continue, or specific step flags."
                         ))
 
             except Exception as e:
@@ -306,3 +322,61 @@ class Command(BaseCommand):
             f"Completed: {success_count} successful, {fail_count} failed"
         ))
         self.stdout.write(f"{'='*60}\n")
+
+    def _continue_processing(self, epub, api_key):
+        """
+        Resume a partial pipeline run to completion.
+
+        Checks what data already exists for the epub and skips those steps,
+        running only what remains in pipeline order:
+            1. chapters  →  2. characters  →  3. relationships  →  4. post-process
+        """
+        has_chapters = epub.chapters.exists()
+        has_characters = epub.characters.exists()
+        has_relationships = epub.relationships.exists()
+
+        self.stdout.write(
+            f"  Resuming from: "
+            f"chapters={'✓' if has_chapters else '✗'}  "
+            f"characters={'✓' if has_characters else '✗'}  "
+            f"relationships={'✓' if has_relationships else '✗'}"
+        )
+
+        # Step 1 — chapters
+        if not has_chapters:
+            self.stdout.write("  → Extracting chapters...")
+            success = process_epub_file(epub.id)
+            if not success:
+                raise Exception("Chapter extraction failed")
+            chapter_count = epub.chapters.count()
+            self.stdout.write(self.style.SUCCESS(f"  ✓ Extracted {chapter_count} chapters"))
+        else:
+            self.stdout.write("  ✓ Chapters already present, skipping.")
+
+        # Step 2 — characters
+        if not has_characters:
+            self.stdout.write("  → Extracting characters with NER...")
+            char_count = extract_characters_with_chunks(epub.id)
+            self.stdout.write(self.style.SUCCESS(f"  ✓ Found {char_count} potential character names"))
+        else:
+            self.stdout.write("  ✓ Characters already present, skipping.")
+
+        # Step 3 — relationships
+        if not has_relationships:
+            self.stdout.write("  → Extracting relationships with LLM...")
+            rel_count = extract_relationships_with_llm(epub.id, api_key)
+            self.stdout.write(self.style.SUCCESS(f"  ✓ Found {rel_count} relationships"))
+        else:
+            self.stdout.write("  ✓ Relationships already present, skipping.")
+
+        # Step 4 — post-process (always run to ensure consolidation is fresh)
+        self.stdout.write("  → Post-processing relationships...")
+        success = consolidate_relationships(epub.id)
+        if not success:
+            raise Exception("Relationship consolidation failed")
+        relationship_count = epub.relationships.count()
+        self.stdout.write(self.style.SUCCESS(
+            f"  ✓ Consolidated to {relationship_count} relationships"
+        ))
+
+        self.stdout.write(self.style.SUCCESS("\n✓ Continue processing complete!"))
