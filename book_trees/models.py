@@ -98,7 +98,36 @@ class Relationship(models.Model):
     character_2 = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_2')
     relationship_type = models.CharField(max_length=100)
     confidence = models.FloatField(default=0.0)
-    evidence = models.JSONField(default=list, blank=True)
+    # More detailed subtype returned by the LLM
+    relationship_subtype = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="More specific relationship label (brother, captor, rival, etc)"
+    )
+
+    evidence = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="""
+        List of evidence objects:
+        [
+            {
+                "chapter": int,
+                "specific_type": str,
+                "confidence": float,
+                "chunks": [
+                    {
+                        "context": str,
+                        "characters_in_context": [str],
+                        "sentence_index": int
+                    }
+                ]
+            }
+        ]
+        """
+    )
+
 
     class Meta:
         unique_together = ['epub', 'character_1', 'character_2', 'relationship_type']

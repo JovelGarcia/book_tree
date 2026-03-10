@@ -91,7 +91,7 @@ class CharacterAdmin(admin.ModelAdmin):
 #RelationshipAdmin
 @admin.register(Relationship)
 class RelationshipAdmin(admin.ModelAdmin):
-    list_display = ['character_1', 'character_2', 'relationship_type', 'confidence', 'evidence']
+    list_display = ['character_1', 'character_2', 'relationship_type', 'relationship_subtype', 'confidence', 'evidence']
     list_filter = ['epub', 'relationship_type', 'confidence']
     search_fields = ['character_1__name', 'character_2__name', 'relationship_type']
     readonly_fields = ['confidence']

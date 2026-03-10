@@ -8,7 +8,7 @@ from fastcoref import FCoref
 # ============================================================================
 
 # Shared spaCy model (same as processing.py)
-nlp = spacy.load("en_core_web_lg")
+nlp = spacy.load("en_core_web_trf")
 
 # fastcoref model — loaded once at module level to avoid repeated disk I/O.
 # FCoref is the lightweight, fast variant; swap for LingMessCoref if you want

@@ -77,9 +77,10 @@ export class EpubRelationships implements OnInit, AfterViewInit {
     const id = this.route.snapshot.paramMap.get('id');
     this.http.get<Relationship[]>(`/api/epubs/${id}/relationships/`).subscribe({
       next: data => {
-        this.data = data;
-        this.relationships.set(data);
-        const types = [...new Set(data.map(r => r.relationship_type))];
+        const filtered = data.filter(r => r.relationship_type !== 'other');
+        this.data = filtered;
+        this.relationships.set(filtered);
+        const types = [...new Set(filtered.map(r => r.relationship_type))];
         this.relationshipTypes.set(types);
         this.loading.set(false);
         setTimeout(() => this.renderGraph(), 50);

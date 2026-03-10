@@ -379,34 +379,75 @@ def analyze_chunks_batch_with_llm(chunks: List[Dict[str, Any]], api_key: str = N
         for i, chunk in enumerate(chunks)
     )
 
-    prompt = f"""Analyze the following text excerpts and identify relationships between characters.
-All excerpts feature the same characters, so consider them together as a body of evidence.
+    prompt = f"""
+    You are extracting relationships between characters from a novel.
 
-{excerpts_text}
+    Below are excerpts where the SAME characters appear together. Treat all excerpts as evidence for the relationship between them.
 
-Characters mentioned: {', '.join(characters)}
+    {excerpts_text}
 
-Instructions:
-1. Identify EXPLICIT relationships only (stated or strongly implied in the text)
-2. Consolidate evidence across excerpts — return one relationship entry per unique character pair + type
-3. Return relationships as JSON in this exact format:
-{{
-    "relationships": [
+    Characters mentioned: {', '.join(characters)}
+
+    Your task:
+    Determine the most accurate relationship between each pair of characters.
+
+    IMPORTANT RULES:
+    1. You MUST choose the closest relationship_type from the allowed list below.
+    2. DO NOT use "other" unless absolutely none of the types apply.
+    3. If the relationship changes across the story, choose the dominant or most recent relationship.
+    4. Use the excerpts as evidence. Do NOT invent information.
+    5. Return ONE entry per character pair.
+
+    Allowed relationship types:
+
+    family
+    romantic
+    friend
+    ally
+    enemy
+    mentor_student
+    master_servant
+    rival
+    captor_captive
+    professional
+    political
+    other
+
+    Definitions:
+
+    family → blood or marriage relationships (parent, sibling, cousin, spouse)
+    romantic → lovers, romantic attraction, marriage
+    friend → personal friendship or companionship
+    ally → cooperative relationship toward shared goals
+    enemy → hostility, betrayal, conflict, or opposition
+    mentor_student → teaching or guiding relationship
+    master_servant → hierarchical service relationship
+    rival → competition without direct hostility
+    captor_captive → imprisonment, hostage, or forced control
+    professional → coworkers, military comrades, colleagues
+    political → ruler/subject or political allegiance
+
+    Return ONLY valid JSON in this format:
+
+    {{
+      "relationships": [
         {{
-            "character_1": "Name1",
-            "character_2": "Name2",
-            "relationship_type": "one of: family, romantic, friend, ally, enemy, mentor, master_servant, other",
-            "specific_type": "brother/sister/father/mother/friend/rival/etc",
-            "confidence": 0.0-1.0,
-            "evidence": "brief quote or summary from any excerpt"
+          "character_1": "Name",
+          "character_2": "Name",
+          "relationship_type": "one_of_the_types_above",
+          "specific_type": "short label like brother, commander, captor, rival, etc",
+          "confidence": 0.0-1.0,
+          "evidence_excerpt_ids": [1,2]
         }}
-    ]
-}}
+      ]
+    }}
 
-4. Use exact character names as they appear in the "Characters mentioned" list
-5. Be specific: prefer "brother" over just "family"
-6. Return ONLY valid JSON, no other text
-"""
+    Rules for evidence:
+    - evidence_excerpt_ids must reference the numbered excerpts above.
+    - choose the excerpts that best support the relationship.
+
+    Return JSON only. No explanation.
+    """
 
     content = None
 
@@ -419,7 +460,7 @@ Instructions:
                     "parts": [{"text": prompt}]
                 }],
                 "generationConfig": {
-                    "temperature": 0.3,
+                    "temperature": 0.15,
                     "maxOutputTokens": 8192,
                     "responseMimeType": "application/json"
                 }
@@ -441,8 +482,15 @@ Instructions:
         # batch (consistent with the previous single-chunk behaviour).
         for rel in relationships:
             rel['chapter_number'] = chunks[0].get('chapter_number')
-            # Use all excerpts concatenated as the evidence context
-            rel['evidence'] = " | ".join(c['context'] for c in chunks)
+
+            excerpt_ids = rel.get("evidence_excerpt_ids", [])
+
+            evidence_chunks = []
+            for idx in excerpt_ids:
+                if 1 <= idx <= len(chunks):
+                    evidence_chunks.append(chunks[idx - 1])
+
+            rel["evidence_chunks"] = evidence_chunks
 
         return relationships
 
@@ -603,6 +651,10 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
             relationships = analyze_chunks_batch_with_llm(batch, api_key)
             all_relationships.extend(relationships)
 
+    # Drop low-confidence relationships before saving
+    all_relationships = [r for r in all_relationships if r.get('confidence', 0) >= 0.7]
+    print(f"Relationships after confidence filter (≥ 0.7): {len(all_relationships)}")
+
     relationships_found = 0
 
     with transaction.atomic():
@@ -626,10 +678,10 @@ def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size
                 )
 
                 evidence_entry = {
-                    'chapter': rel_data.get('chapter_number'),
-                    'specific_type': rel_data.get('specific_type'),
-                    'evidence': rel_data.get('evidence'),
-                    'confidence': rel_data.get('confidence'),
+                    "chapter": rel_data.get("chapter_number"),
+                    "specific_type": rel_data.get("specific_type"),
+                    "confidence": rel_data.get("confidence"),
+                    "chunks": rel_data.get("evidence_chunks", [])
                 }
 
                 if evidence_entry not in rel.evidence:
