@@ -2,3 +2,5 @@ test.py
 .env
 backend_venv/
 label_venv
+book_trees/corpus
+book_trees/output

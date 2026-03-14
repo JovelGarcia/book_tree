@@ -15,4 +15,8 @@ urlpatterns = [
     # Relationships
     path('api/epubs/<int:epub_id>/relationships/', views.relationship_list_api),
     path('api/epubs/<int:epub_id>/relationships/<int:relationship_id>/', views.relationship_detail_api),
+
+    #Labels
+    path('api/label/sentences/', views.labeled_sentence_list_api),
+    path('api/label/sentences/export/', views.export_spacy_format),
 ]

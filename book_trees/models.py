@@ -90,7 +90,23 @@ class Chapter(models.Model):
             return f"{self.section.title} - Chapter {self.chapter_number}"
         return f"{self.epub.original_filename} - Chapter {self.chapter_number}"
 
+class LabeledSentence(models.Model):
+    epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE, related_name='labeled_sentences', null=True, blank=True)
+    text = models.TextField()
+    entities = models.JSONField(
+        default=list,
+        help_text="""
+        spaCy-compatible span format:
+        [{"start": 0, "end": 5, "label": "PERSON"}, ...]
+        """
+    )
+    source = models.CharField(max_length=100, blank=True, help_text="Book title or origin")
+    labeled_by = models.CharField(max_length=100, blank=True)
+    labeled_at = models.DateTimeField(auto_now_add=True)
+    is_reviewed = models.BooleanField(default=False)
 
+    def __str__(self):
+        return self.text[:60]
 
 class Relationship(models.Model):
     epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE, related_name='relationships')

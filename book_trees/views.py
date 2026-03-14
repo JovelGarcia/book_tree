@@ -3,8 +3,8 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
-from .models import EpubFile, Character, Relationship
-from .serializers import EpubSerializer, CharacterSerializer, RelationshipSerializer
+from .models import EpubFile, Character, Relationship, LabeledSentence
+from .serializers import EpubSerializer, CharacterSerializer, RelationshipSerializer, LabeledSentenceSerializer
 
 
 @api_view(['GET'])
@@ -60,6 +60,35 @@ def character_list_api(request, epub_id):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+@api_view(['GET', 'POST'])
+def labeled_sentence_list_api(request):
+    if request.method == 'GET':
+        sentences = LabeledSentence.objects.all()
+        serializer = LabeledSentenceSerializer(sentences, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        # Accepts single or bulk: {"sentences": [...]} or single object
+        data = request.data
+        if 'sentences' in data:
+            serializer = LabeledSentenceSerializer(data=data['sentences'], many=True)
+        else:
+            serializer = LabeledSentenceSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+def export_spacy_format(request):
+    """Exports labeled sentences in spaCy DocBin-ready JSON format."""
+    sentences = LabeledSentence.objects.filter(is_reviewed=True)
+    output = [
+        {"text": s.text, "entities": s.entities}
+        for s in sentences
+    ]
+    return Response(output)
 
 @api_view(['GET', 'PUT', 'DELETE'])
 def character_detail_api(request, epub_id, character_id):

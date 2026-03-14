@@ -13,7 +13,7 @@ from .pre_processing import run_pre_processing
 
 
 # load NLP
-nlp = spacy.load("en_core_web_lg")
+nlp = spacy.load("en_core_web_trf")
 
 # ============================================================================
 # PRE-FILTERING: Remove obvious non-characters before LLM processing
