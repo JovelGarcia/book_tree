@@ -1,26 +1,14 @@
 import spacy
-import os
-import sys
-import django
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any, Optional
 from fastcoref import FCoref
-
-# Add the parent directory so Python can find the book_tree package
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'book_tree.settings')
-
-django.setup()
 
 # ============================================================================
 # NLP MODEL INITIALISATION
 # ============================================================================
 
 # Shared spaCy model (same as processing.py)
-nlp = spacy.load("book_trees/output/model-best")
-if not nlp.has_pipe("sentencizer") and not nlp.has_pipe("senter") and not nlp.has_pipe("parser"):
-    nlp.add_pipe("sentencizer", first=True)
+nlp = spacy.load("en_core_web_trf")
 
 # fastcoref model — loaded once at module level to avoid repeated disk I/O.
 # FCoref is the lightweight, fast variant; swap for LingMessCoref if you want
@@ -106,8 +94,6 @@ def score_characters(
     is_actor: Dict[str, bool] = defaultdict(bool)
     in_attribution: Dict[str, bool] = defaultdict(bool)
 
-    has_parser = nlp.has_pipe("parser") or nlp.has_pipe("senter")
-
     for chapter in chapters_data:
         chapter_num = chapter['chapter_number']
         content = chapter['content']
@@ -180,36 +166,21 @@ def score_characters(
         elif count == 1:
             score -= 2
 
-        if has_parser:
-            if is_nsubj[name]:
-                score += 2
-            if in_attribution[name]:
-                score += 1
-            if not is_actor[name]:
-                score -= 2
+        if is_nsubj[name]:
+            score += 2
+
+        if in_attribution[name]:
+            score += 1
 
         if len(chapter_sets[name]) >= 2:
             score += 1
 
+        if not is_actor[name]:
+            score -= 2
+
         scores[name] = score
 
-    # Without a parser, lemmatization is unavailable so in_attribution never
-    # fires and dep-based scores are skipped. The maximum reachable score is
-    # +2 (mention count) + 1 (cross-chapter). Lower the threshold accordingly.
-    THRESHOLD = 2 if not has_parser else 3
-
-    if not has_parser:
-        print("\nCharacter validation results (no-parser mode, threshold=2):")
-    else:
-        print("\nCharacter validation results:")
-
-    for name in sorted(mention_counts.keys()):
-        count = mention_counts[name]
-        score = scores.get(name, 0)
-        status = "✓" if name in {n for n, s in scores.items() if s >= THRESHOLD} else "✗"
-        chapters = len(chapter_sets[name])
-        print(f"  {status} {name:<30} mentions={count:<5} chapters={chapters:<3} score={score}")
-
+    THRESHOLD = 3
     return {name: score for name, score in scores.items() if score >= THRESHOLD}
 
 
@@ -518,8 +489,6 @@ def _score_with_threshold(
     is_actor: Dict[str, bool] = defaultdict(bool)
     in_attribution: Dict[str, bool] = defaultdict(bool)
 
-    has_parser = nlp.has_pipe("parser") or nlp.has_pipe("senter")
-
     for chapter in chapters_data:
         chapter_num = chapter['chapter_number']
         content = chapter['content']
@@ -580,15 +549,14 @@ def _score_with_threshold(
             score += 2
         elif count == 1:
             score -= 2
-        if has_parser:
-            if is_nsubj[name]:
-                score += 2
-            if in_attribution[name]:
-                score += 1
-            if not is_actor[name]:
-                score -= 2
+        if is_nsubj[name]:
+            score += 2
+        if in_attribution[name]:
+            score += 1
         if len(chapter_sets[name]) >= 2:
             score += 1
+        if not is_actor[name]:
+            score -= 2
         if score >= threshold:
             result.append(name)
 
