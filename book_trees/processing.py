@@ -2,6 +2,8 @@ import re
 import spacy
 import json
 import requests
+import os
+import sys
 import time
 from django.db import transaction
 from .models import EpubFile, Chapter, Character, Relationship
@@ -13,7 +15,10 @@ from .pre_processing import run_pre_processing
 
 
 # load NLP
-nlp = spacy.load("en_core_web_trf")
+nlp = spacy.load("book_trees/output/model-best")
+if not nlp.has_pipe("sentencizer") and not nlp.has_pipe("senter") and not nlp.has_pipe("parser"):
+    nlp.add_pipe("sentencizer", first=True)
+
 
 # ============================================================================
 # PRE-FILTERING: Remove obvious non-characters before LLM processing
