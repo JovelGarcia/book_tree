@@ -7,8 +7,8 @@ from fastcoref import FCoref
 # NLP MODEL INITIALISATION
 # ============================================================================
 
-# Shared spaCy model (same as processing.py)
-nlp = spacy.load("en_core_web_trf")
+nlp = spacy.load("en_core_web_trf")        # dep parsing, sentence boundary, syntax
+nlp_ner = spacy.load("/Users/jovel/Developer/GitHub/book_tree/book_trees/output/model-best")  # domain-tuned NER (sci-fi/fantasy entities)
 
 # fastcoref model — loaded once at module level to avoid repeated disk I/O.
 # FCoref is the lightweight, fast variant; swap for LingMessCoref if you want
@@ -103,14 +103,27 @@ def score_characters(
             continue
 
         candidate_lower = {n.lower(): n for n in candidate_names}
-        doc = nlp(content)
+        doc = nlp(content)          # syntax: dep tags, sentence boundaries
+        doc_ner = nlp_ner(content)  # domain NER: PERSON entities
+
+        # Pre-collect all PERSON entities from domain NER, keyed by char offset.
+        # model-best has no sentencizer, so we never call doc_ner.sents —
+        # instead we filter entities into each sentence by character span.
+        ner_entities = [ent for ent in doc_ner.ents if ent.label_ == 'PERSON']
 
         for sent in doc.sents:
+            # Entities whose char span falls within this sentence
+            sent_ents = [
+                ent for ent in ner_entities
+                if ent.start_char >= sent.start_char and ent.end_char <= sent.end_char
+            ]
+
             has_attribution = any(
                 token.lemma_.lower() in ATTRIBUTION_VERBS
                 for token in sent
             )
 
+            # Token-level dep scoring — uses nlp (syntax)
             for token in sent:
                 token_lower = token.text.lower()
                 if token_lower in candidate_lower:
@@ -128,10 +141,8 @@ def score_characters(
                     if has_attribution:
                         in_attribution[canonical] = True
 
-            for ent in sent.ents:
-                if ent.label_ != 'PERSON':
-                    continue
-
+            # Entity-level scoring — domain NER entities filtered to this sentence
+            for ent in sent_ents:
                 ent_text = ent.text.strip()
                 if ent_text.endswith("'s"):
                     ent_text = ent_text[:-2]
@@ -294,18 +305,27 @@ def create_sentence_chunks(
     if not validated_character_names:
         return []
 
+    chunks = []
     name_lookup: Dict[str, str] = {n.lower(): n for n in validated_character_names}
-    doc = nlp(content)
-    sentences = list(doc.sents)
-    chunks: List[Dict[str, Any]] = []
+    doc = nlp(content)          # syntax: sentence boundaries, dep tags
+    doc_ner = nlp_ner(content)  # domain NER: PERSON entities
 
-    for sent_idx, sent in enumerate(sentences):
+    # Pre-collect all PERSON entities from domain NER, filtered by char offset
+    # per sentence below — model-best has no sentencizer so we never call
+    # doc_ner.sents directly.
+    ner_entities = [ent for ent in doc_ner.ents if ent.label_ == 'PERSON']
+
+    for sent_idx, sent in enumerate(doc.sents):
         found_names: List[str] = []
         seen_spans: set = set()
 
-        for ent in sent.ents:
-            if ent.label_ != 'PERSON':
-                continue
+        # Entity detection — domain NER entities filtered to this sentence
+        sent_ents = [
+            ent for ent in ner_entities
+            if ent.start_char >= sent.start_char and ent.end_char <= sent.end_char
+        ]
+
+        for ent in sent_ents:
             ent_text = ent.text.strip()
             if ent_text.endswith("'s"):
                 ent_text = ent_text[:-2]
@@ -315,6 +335,7 @@ def create_sentence_chunks(
                 for tok in ent:
                     seen_spans.add(tok.i)
 
+        # Token fallback — catches names the NER missed
         for token in sent:
             if token.i in seen_spans:
                 continue
@@ -497,12 +518,23 @@ def _score_with_threshold(
             continue
 
         candidate_lower = {n.lower(): n for n in candidate_names}
-        doc = nlp(content)
+        doc = nlp(content)          # syntax: dep tags, sentence boundaries
+        doc_ner = nlp_ner(content)  # domain NER: PERSON entities
+
+        # Pre-collect PERSON entities, filter per sentence by char offset
+        ner_entities = [ent for ent in doc_ner.ents if ent.label_ == 'PERSON']
 
         for sent in doc.sents:
+            sent_ents = [
+                ent for ent in ner_entities
+                if ent.start_char >= sent.start_char and ent.end_char <= sent.end_char
+            ]
+
             has_attribution = any(
                 token.lemma_.lower() in ATTRIBUTION_VERBS for token in sent
             )
+
+            # Token-level dep scoring — syntax doc
             for token in sent:
                 tl = token.text.lower()
                 if tl in candidate_lower:
@@ -518,9 +550,8 @@ def _score_with_threshold(
                     if has_attribution:
                         in_attribution[canonical] = True
 
-            for ent in sent.ents:
-                if ent.label_ != 'PERSON':
-                    continue
+            # Entity-level scoring — domain NER entities filtered to this sentence
+            for ent in sent_ents:
                 ent_text = ent.text.strip()
                 if ent_text.endswith("'s"):
                     ent_text = ent_text[:-2]
