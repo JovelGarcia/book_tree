@@ -3,6 +3,7 @@ import spacy
 import json
 import requests
 import time
+from dataclasses import dataclass
 from django.db import transaction
 from .models import EpubFile, Chapter, Character, Relationship
 from .epub_processing import extract_chapters_from_epub, process_epub_file  # noqa: F401
@@ -14,6 +15,51 @@ from .pre_processing import run_pre_processing
 
 # load NLP
 nlp = spacy.load("en_core_web_trf")
+
+# ============================================================================
+# GEMINI CONFIG
+# ============================================================================
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
+
+RELATIONSHIP_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "relationships": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "character_1": {"type": "string"},
+                    "character_2": {"type": "string"},
+                    "relationship_type": {
+                        "type": "string",
+                        "enum": [
+                            "family", "romantic", "friend", "ally", "enemy",
+                            "mentor_student", "master_servant", "rival",
+                            "captor_captive", "professional", "political"
+                        ]
+                    },
+                },
+                "required": ["character_1", "character_2", "relationship_type"]
+            }
+        }
+    },
+    "required": ["relationships"]
+}
+
+# ============================================================================
+# RELATIONSHIP DATACLASS
+# ============================================================================
+
+@dataclass
+class RelationshipInfo:
+    character_1: str
+    character_2: str
+    relationship_type: str
+    # Populated after LLM response, not part of the schema
+    chapter_number: int = None
+
 
 # ============================================================================
 # PRE-FILTERING: Remove obvious non-characters before LLM processing
@@ -232,7 +278,7 @@ def extract_characters_with_chunks(epub_id):
 
     # Collect chapter content for pre_processing
     chapters_data = []
-    chapter_docs= {}
+    chapter_docs = {}
 
     for chapter in chapters:
         doc = nlp(chapter.content)
@@ -343,24 +389,23 @@ def extract_characters_with_chunks(epub_id):
     }
 
 
-def analyze_chunks_batch_with_llm(chunks: List[Dict[str, Any]], api_key: str = None) -> List[Dict]:
+def analyze_chunks_batch_with_llm(chunks: List[Dict[str, Any]], api_key: str = None) -> List[RelationshipInfo]:
     """
     Sends a batch of chunks that all share the same character set to Gemini
     2.5 Flash-Lite for relationship analysis in a single API request.
 
-    Grouping chunks by character pair reduces API calls significantly: instead
-    of one request per sentence chunk, we make one request per unique character
-    pair combination found across all chunks.
+    Uses Gemini's responseSchema to enforce structured output — no JSON
+    parsing fallbacks needed.
 
     Args:
         chunks: List of chunk dicts, each containing:
             - context: str - The text excerpt
             - characters_in_context: List[str] - Character names (same across batch)
             - chapter_number: int - Chapter number for reference
-        api_key: Google API Key
+        api_key: Google API key
 
     Returns:
-        List of relationship dictionaries extracted from the LLM response,
+        List of RelationshipInfo objects extracted from the LLM response,
         each annotated with chapter_number and evidence from its source chunk.
     """
     if not chunks:
@@ -393,10 +438,9 @@ def analyze_chunks_batch_with_llm(chunks: List[Dict[str, Any]], api_key: str = N
 
     IMPORTANT RULES:
     1. You MUST choose the closest relationship_type from the allowed list below.
-    2. DO NOT use "other" unless absolutely none of the types apply.
-    3. If the relationship changes across the story, choose the dominant or most recent relationship.
-    4. Use the excerpts as evidence. Do NOT invent information.
-    5. Return ONE entry per character pair.
+    2. If the relationship changes across the story, choose the dominant or most recent relationship.
+    3. Use the excerpts as evidence. Do NOT invent information.
+    4. Return ONE entry per character pair.
 
     Allowed relationship types:
 
@@ -411,7 +455,6 @@ def analyze_chunks_batch_with_llm(chunks: List[Dict[str, Any]], api_key: str = N
     captor_captive
     professional
     political
-    other
 
     Definitions:
 
@@ -426,34 +469,11 @@ def analyze_chunks_batch_with_llm(chunks: List[Dict[str, Any]], api_key: str = N
     captor_captive → imprisonment, hostage, or forced control
     professional → coworkers, military comrades, colleagues
     political → ruler/subject or political allegiance
-
-    Return ONLY valid JSON in this format:
-
-    {{
-      "relationships": [
-        {{
-          "character_1": "Name",
-          "character_2": "Name",
-          "relationship_type": "one_of_the_types_above",
-          "specific_type": "short label like brother, commander, captor, rival, etc",
-          "confidence": 0.0-1.0,
-          "evidence_excerpt_ids": [1,2]
-        }}
-      ]
-    }}
-
-    Rules for evidence:
-    - evidence_excerpt_ids must reference the numbered excerpts above.
-    - choose the excerpts that best support the relationship.
-
-    Return JSON only. No explanation.
     """
-
-    content = None
 
     try:
         response = make_api_request_with_retry(
-            url=f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}",
+            url=f"{GEMINI_URL}?key={api_key}",
             headers={"Content-Type": "application/json"},
             json_data={
                 "contents": [{
@@ -462,87 +482,129 @@ def analyze_chunks_batch_with_llm(chunks: List[Dict[str, Any]], api_key: str = N
                 "generationConfig": {
                     "temperature": 0.15,
                     "maxOutputTokens": 8192,
-                    "responseMimeType": "application/json"
+                    "responseMimeType": "application/json",
+                    "responseSchema": RELATIONSHIP_RESPONSE_SCHEMA
                 }
             }
         )
 
         result = response.json()
 
-        if 'candidates' in result and len(result['candidates']) > 0:
-            content = result['candidates'][0]['content']['parts'][0]['text'].strip()
-        else:
+        if 'candidates' not in result or not result['candidates']:
             print(f"Unexpected Gemini response format: {result}")
             return []
 
+        content = result['candidates'][0]['content']['parts'][0]['text'].strip()
         parsed_data = json.loads(content)
-        relationships = parsed_data.get('relationships', [])
 
-        # Annotate each relationship with the chapter of the first chunk in the
-        # batch (consistent with the previous single-chunk behaviour).
-        for rel in relationships:
-            rel['chapter_number'] = chunks[0].get('chapter_number')
+        relationship_infos: List[RelationshipInfo] = []
 
-            excerpt_ids = rel.get("evidence_excerpt_ids", [])
+        for r in parsed_data.get('relationships', []):
+            rel = RelationshipInfo(**r)
+            rel.chapter_number = chunks[0].get('chapter_number')
+            relationship_infos.append(rel)
 
-            evidence_chunks = []
-            for idx in excerpt_ids:
-                if 1 <= idx <= len(chunks):
-                    evidence_chunks.append(chunks[idx - 1])
-
-            rel["evidence_chunks"] = evidence_chunks
-
-        return relationships
+        return relationship_infos
 
     except requests.exceptions.RequestException as e:
         print(f"API request failed: {e}")
         if hasattr(e, 'response') and e.response is not None:
             print(f"Response content: {e.response.text}")
         return []
-    except json.JSONDecodeError as e:
-        print(f"Failed to parse JSON response: {e}")
-        if content is None:
-            print("No content was received from the API")
-            return []
-
-        # Attempt recovery: strip markdown code fences
-        try:
-            cleaned = re.sub(r'^```(?:json)?\s*', '', content.strip())
-            cleaned = re.sub(r'\s*```$', '', cleaned).strip()
-            parsed_data = json.loads(cleaned)
-            relationships = parsed_data.get('relationships', [])
-            for rel in relationships:
-                rel['chapter_number'] = chunks[0].get('chapter_number')
-                rel['evidence'] = " | ".join(c['context'] for c in chunks)
-            print(f"  ↳ Recovered after stripping code fences ({len(relationships)} relationships)")
-            return relationships
-        except json.JSONDecodeError:
-            pass
-
-        # Partial recovery: salvage complete relationship objects
-        try:
-            partial_matches = re.findall(r'\{[^{}]+\}', content)
-            recovered = []
-            for match in partial_matches:
-                try:
-                    obj = json.loads(match)
-                    if 'character_1' in obj and 'character_2' in obj and 'relationship_type' in obj:
-                        obj['chapter_number'] = chunks[0].get('chapter_number')
-                        obj['evidence'] = " | ".join(c['context'] for c in chunks)
-                        recovered.append(obj)
-                except json.JSONDecodeError:
-                    continue
-            if recovered:
-                print(f"  ↳ Partially recovered {len(recovered)} relationships from truncated response")
-                return recovered
-        except Exception:
-            pass
-
-        print(f"  ↳ Could not recover — skipping batch. Raw content preview: {content[:200]}")
-        return []
     except Exception as e:
         print(f"Unexpected error in LLM analysis: {e}")
         return []
+
+
+def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size: int = 10):
+    """
+    Extract relationships from an EPUB using LLM analysis on sentence chunks.
+
+    Chunks are grouped by their sorted character-pair key so that all sentences
+    featuring the same pair of characters are sent to the LLM in a single
+    batched request. This significantly reduces the total number of API calls
+    compared to the previous one-chunk-per-request approach.
+
+    Args:
+        epub_id: ID of the EpubFile to process
+        api_key: Google API key
+        batch_size: Maximum number of chunks to include in a single LLM request
+                    (guards against excessively long prompts)
+
+    Returns:
+        Number of relationships found
+    """
+    epub = EpubFile.objects.get(id=epub_id)
+    chapters = epub.chapters.all()
+
+    # ── Collect all valid chunks across every chapter ────────────────────────
+    # Key: frozenset of character names -> list of chunk dicts
+    chunks_by_character_pair: Dict[frozenset, List[Dict[str, Any]]] = defaultdict(list)
+
+    for chapter in chapters:
+        for chunk in (chapter.annotated_sentences or []):
+            characters = chunk.get('characters_in_context', [])
+            if len(characters) < 2:
+                continue
+            chunk_with_chapter = {**chunk, 'chapter_number': chapter.chapter_number}
+            pair_key = frozenset(characters)
+            chunks_by_character_pair[pair_key].append(chunk_with_chapter)
+
+    total_groups = len(chunks_by_character_pair)
+    total_chunks = sum(len(v) for v in chunks_by_character_pair.values())
+    print(f"Grouped {total_chunks} chunks into {total_groups} unique character-pair groups")
+
+    # ── Send one (or a few) LLM request(s) per character-pair group ─────────
+    all_relationships: List[RelationshipInfo] = []
+
+    for pair_key, group_chunks in chunks_by_character_pair.items():
+        # Split very large groups into sub-batches to avoid oversized prompts
+        for batch_start in range(0, len(group_chunks), batch_size):
+            batch = group_chunks[batch_start: batch_start + batch_size]
+            relationships = analyze_chunks_batch_with_llm(batch, api_key)
+            all_relationships.extend(relationships)
+
+    print(f"Total relationships extracted: {len(all_relationships)}")
+
+    relationships_found = 0
+
+    with transaction.atomic():
+        for rel_info in all_relationships:
+            try:
+                char1 = Character.objects.get(epub=epub, name=rel_info.character_1)
+                char2 = Character.objects.get(epub=epub, name=rel_info.character_2)
+
+                if char1.name > char2.name:
+                    char1, char2 = char2, char1
+
+                rel, created = Relationship.objects.get_or_create(
+                    epub=epub,
+                    character_1=char1,
+                    character_2=char2,
+                    relationship_type=rel_info.relationship_type,
+                    defaults={'evidence': []}
+                )
+
+                # Build evidence from the chunks we already have locally
+                pair_key = frozenset([rel_info.character_1, rel_info.character_2])
+                evidence_entry = {
+                    "chapter": rel_info.chapter_number,
+                    "chunks": chunks_by_character_pair.get(pair_key, [])
+                }
+
+                if evidence_entry not in rel.evidence:
+                    rel.evidence.append(evidence_entry)
+                    rel.save()
+                    relationships_found += 1
+
+            except Character.DoesNotExist:
+                print(f"Character not found: {rel_info.character_1} or {rel_info.character_2}")
+                continue
+            except Exception as e:
+                print(f"Error processing relationship: {e}")
+                continue
+
+    return relationships_found
 
 
 def merge_characters_internal(primary_character, characters_to_merge):
@@ -603,104 +665,6 @@ def merge_characters_internal(primary_character, characters_to_merge):
                 seen.add(key)
 
 
-def extract_relationships_with_llm(epub_id: int, api_key: str = None, batch_size: int = 10):
-    """
-    Extract relationships from an EPUB using LLM analysis on sentence chunks.
-
-    Chunks are grouped by their sorted character-pair key so that all sentences
-    featuring the same pair of characters are sent to the LLM in a single
-    batched request. This significantly reduces the total number of API calls
-    compared to the previous one-chunk-per-request approach.
-
-    Args:
-        epub_id: ID of the EpubFile to process
-        api_key: API key for the LLM service
-        batch_size: Maximum number of chunks to include in a single LLM request
-                    (guards against excessively long prompts)
-
-    Returns:
-        Number of relationships found
-    """
-    epub = EpubFile.objects.get(id=epub_id)
-    chapters = epub.chapters.all()
-
-    # ── Collect all valid chunks across every chapter ────────────────────────
-    # Key: frozenset of character names -> list of chunk dicts
-    chunks_by_character_pair: Dict[frozenset, List[Dict[str, Any]]] = defaultdict(list)
-
-    for chapter in chapters:
-        for chunk in (chapter.annotated_sentences or []):
-            characters = chunk.get('characters_in_context', [])
-            if len(characters) < 2:
-                continue
-            chunk_with_chapter = {**chunk, 'chapter_number': chapter.chapter_number}
-            pair_key = frozenset(characters)
-            chunks_by_character_pair[pair_key].append(chunk_with_chapter)
-
-    total_groups = len(chunks_by_character_pair)
-    total_chunks = sum(len(v) for v in chunks_by_character_pair.values())
-    print(f"Grouped {total_chunks} chunks into {total_groups} unique character-pair groups")
-
-    # ── Send one (or a few) LLM request(s) per character-pair group ─────────
-    all_relationships = []
-
-    for pair_key, group_chunks in chunks_by_character_pair.items():
-        # Split very large groups into sub-batches to avoid oversized prompts
-        for batch_start in range(0, len(group_chunks), batch_size):
-            batch = group_chunks[batch_start: batch_start + batch_size]
-            relationships = analyze_chunks_batch_with_llm(batch, api_key)
-            all_relationships.extend(relationships)
-
-    # Drop low-confidence relationships before saving
-    all_relationships = [r for r in all_relationships if r.get('confidence', 0) >= 0.7]
-    print(f"Relationships after confidence filter (≥ 0.7): {len(all_relationships)}")
-
-    relationships_found = 0
-
-    with transaction.atomic():
-        for rel_data in all_relationships:
-            try:
-                char1 = Character.objects.get(epub=epub, name=rel_data['character_1'])
-                char2 = Character.objects.get(epub=epub, name=rel_data['character_2'])
-
-                if char1.name > char2.name:
-                    char1, char2 = char2, char1
-
-                rel, created = Relationship.objects.get_or_create(
-                    epub=epub,
-                    character_1=char1,
-                    character_2=char2,
-                    relationship_type=rel_data['relationship_type'],
-                    defaults={
-                        'confidence': rel_data.get('confidence', 0.7),
-                        'evidence': []
-                    }
-                )
-
-                evidence_entry = {
-                    "chapter": rel_data.get("chapter_number"),
-                    "specific_type": rel_data.get("specific_type"),
-                    "confidence": rel_data.get("confidence"),
-                    "chunks": rel_data.get("evidence_chunks", [])
-                }
-
-                if evidence_entry not in rel.evidence:
-                    rel.evidence.append(evidence_entry)
-                    avg_confidence = sum(e.get('confidence', 0.7) for e in rel.evidence) / len(rel.evidence)
-                    rel.confidence = min(0.95, avg_confidence)
-                    rel.save()
-                    relationships_found += 1
-
-            except Character.DoesNotExist:
-                print(f"Character not found: {rel_data.get('character_1')} or {rel_data.get('character_2')}")
-                continue
-            except Exception as e:
-                print(f"Error processing relationship: {e}")
-                continue
-
-    return relationships_found
-
-
 def process_book_complete(epub_id, api_key):
     """
     Complete book processing pipeline.
@@ -714,7 +678,7 @@ def process_book_complete(epub_id, api_key):
 
     Args:
         epub_id: ID of the EpubFile to process
-        api_key: Google API key for LLM analysis
+        api_key: Google API key for Gemini
 
     Returns:
         Dictionary with processing stats
