@@ -20,8 +20,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Load environment variables
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
-# Now you can use it anywhere
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+
+BRAVE_API_KEY = os.getenv('BRAVE_API_KEY')
 
 # Media files (uploads)
 MEDIA_URL = '/media/'
@@ -90,6 +91,9 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'book_tree.wsgi.application'
+
+CELERY_BROKER_URL = 'amqp://guest:guest@localhost:5672//'
+CELERY_RESULT_BACKEND = 'rpc://'
 
 
 # Database

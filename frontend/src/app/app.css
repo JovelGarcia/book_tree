@@ -1,4 +1,15 @@
 :host {
   display: block;
   min-height: 100vh;
+  background: var(--color-bg, #0a0a14);
+  color: var(--color-text, #e8e8f0);
+  font-family: system-ui, -apple-system, sans-serif;
+
+  --color-bg:      #0a0a14;
+  --color-surface: #13131f;
+  --color-input:   #0d0d1a;
+  --color-border:  #252540;
+  --color-muted:   #6b6b8a;
+  --color-text:    #e8e8f0;
+  --color-accent:  #7c6dfa;
 }

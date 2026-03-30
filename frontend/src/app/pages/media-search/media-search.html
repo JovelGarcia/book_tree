@@ -1,0 +1,138 @@
+<div class="page">
+
+  <!-- ══ HEADER ══════════════════════════════════════════════════════════ -->
+  <header class="page-header">
+    <span class="logo-glyph">🕸️</span>
+    <h1 class="logo-text">FandomGraph</h1>
+    <p class="tagline">Submit any title — we'll map its character network from fandom.com</p>
+  </header>
+
+  <!-- ══ SUBMISSION FORM ═════════════════════════════════════════════════ -->
+  <section class="card">
+    <h2 class="card__title">What would you like to map?</h2>
+
+    <!-- Title input -->
+    <div class="field">
+      <label class="field__label" for="title-input">Title</label>
+      <input
+        id="title-input"
+        class="field__input"
+        type="text"
+        placeholder="e.g. Death Note, Elden Ring, Interstellar…"
+        [ngModel]="title()"
+        (ngModelChange)="title.set($event)"
+        (keydown)="onKeydown($event)"
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </div>
+
+    <!-- Media type selector -->
+    <div class="field">
+      <label class="field__label">Media type</label>
+      <div class="type-grid">
+        @for (opt of mediaOptions; track opt.value) {
+          <button
+            class="type-btn"
+            [class.type-btn--active]="mediaType() === opt.value"
+            (click)="setType(opt.value)"
+            type="button"
+          >
+            <span class="type-btn__emoji">{{ opt.emoji }}</span>
+            <span class="type-btn__label">{{ opt.label }}</span>
+          </button>
+        }
+      </div>
+    </div>
+
+    <!-- Error -->
+    @if (error()) {
+      <p class="alert alert--error">{{ error() }}</p>
+    }
+
+    <!-- Submit -->
+    <button
+      class="btn btn--primary btn--full"
+      (click)="submit()"
+      [disabled]="submitting() || !title().trim()"
+    >
+      @if (submitting()) {
+        <span class="spinner"></span> Submitting…
+      } @else {
+        Build graph
+      }
+    </button>
+
+    <!-- Quick examples -->
+    <div class="examples">
+      <span class="examples__label">Quick start:</span>
+      @for (ex of examples; track ex.title) {
+        <button class="chip" (click)="tryExample(ex)" type="button">{{ ex.title }}</button>
+      }
+    </div>
+  </section>
+
+  <!-- ══ ACTIVE JOB STATUS ═══════════════════════════════════════════════ -->
+  @if (job(); as j) {
+    <section class="card status-card">
+      <div class="status-card__top">
+        <div class="status-card__info">
+          <h3 class="status-card__title">{{ j.title }}</h3>
+          <span class="status-card__type">{{ j.media_type_display }}</span>
+          @if (j.wiki_url) {
+            <a class="status-card__wiki" [href]="j.wiki_url" target="_blank" rel="noopener">
+              {{ j.wiki_slug }}.fandom.com ↗
+            </a>
+          }
+        </div>
+        <span [class]="statusClass(j.status)">{{ j.status_display }}</span>
+      </div>
+
+      <!-- Progress (still running) -->
+      @if (!isTerminal(j.status)) {
+        <div class="progress-bar">
+          <div class="progress-bar__fill"></div>
+        </div>
+        <p class="status-card__hint">
+          Resolving wiki, scraping characters and relationships…
+        </p>
+      }
+
+      <!-- Success -->
+      @if (j.status === 'c') {
+        <div class="status-card__actions">
+          <a class="btn btn--primary" [href]="graphUrl(j)">View graph →</a>
+          <button class="btn btn--ghost" (click)="reset()">Search another</button>
+        </div>
+      }
+
+      <!-- Failed -->
+      @if (j.status === 'f') {
+        <p class="alert alert--error">{{ j.error_message }}</p>
+        <button class="btn btn--ghost" (click)="reset()">Try again</button>
+      }
+    </section>
+  }
+
+  <!-- ══ PAST JOBS ════════════════════════════════════════════════════════ -->
+  @if (pastJobs().length > 0) {
+    <section class="history">
+      <h3 class="history__heading">Previous graphs</h3>
+      <ul class="history-list">
+        @for (j of pastJobs(); track j.id) {
+          <li class="history-item">
+            <div class="history-item__info">
+              <span class="history-item__title">{{ j.title }}</span>
+              <span class="history-item__type">{{ j.media_type_display }}</span>
+            </div>
+            <span [class]="statusClass(j.status)">{{ j.status_display }}</span>
+            @if (j.status === 'c') {
+              <a class="history-item__link" [href]="graphUrl(j)">View →</a>
+            }
+          </li>
+        }
+      </ul>
+    </section>
+  }
+
+</div>

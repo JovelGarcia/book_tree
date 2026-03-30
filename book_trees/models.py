@@ -1,152 +1,89 @@
 from django.db import models
 from django.utils import timezone
 
-# Create your models here.
 
-class EpubFile(models.Model):
-    file = models.FileField(upload_to='epubs/%Y/%m/%d')
-
-    original_filename = models.CharField(max_length=255)
-
-    uploaded_at = models.DateTimeField(default=timezone.now)
-    processed = models.BooleanField(default=False)
-
-    STATUS_CHOICES = [
-        ('p', 'pending'),
-        ('pr', 'processing'),
-        ('c', 'completed'),
-        ('f', 'failed'),
+class MediaRequest(models.Model):
+    MEDIA_TYPE_CHOICES = [
+        ('anime', 'Anime'),
+        ('tv',    'TV Show'),
+        ('movie', 'Movie'),
+        ('game',  'Game'),
+        ('book',  'Book'),
     ]
-    status = models.CharField(max_length=2, choices=STATUS_CHOICES, default='p')
+    STATUS_CHOICES = [
+        ('p',  'Pending'),
+        ('pr', 'Processing'),
+        ('c',  'Completed'),
+        ('f',  'Failed'),
+        ('ns', 'Needs Scope'),       # dedicated wiki exists, but no title-scoped category
+        ('nc', 'No Category'),       # best wiki found, but zero character categories
+    ]
+    RESOLUTION_STRATEGY = [
+        ('dedicated_scoped',   'Dedicated wiki, scoped category'),
+        ('umbrella_scoped',    'Umbrella wiki, scoped category'),
+        ('dedicated_unscoped', 'Dedicated wiki, unscoped category'),
+        ('no_category',        'No useful character category'),
+    ]
 
-    class Meta:
-        ordering = ['uploaded_at']
+    title      = models.CharField(max_length=255)
+    media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES)
 
-    def __str__(self):
-        return f"{self.original_filename} - {self.uploaded_at.strftime('%Y-%m-%d')}"
+    # Resolved once the task starts
+    wiki_slug  = models.CharField(max_length=255, blank=True)
+    wiki_url   = models.URLField(blank=True)
 
-class Section(models.Model):
-    epub = models.ForeignKey(
-        EpubFile,
-        on_delete=models.CASCADE,
-        related_name='sections'
+    # Strategy / category reasoning
+    resolution_strategy = models.CharField(
+        max_length=20,
+        choices=RESOLUTION_STRATEGY,
+        blank=True,
+        default='',
     )
-    title = models.CharField(max_length=500)
-    order = models.IntegerField()
+    chosen_category      = models.CharField(max_length=500, blank=True, default='')
+    metadata_categories  = models.JSONField(default=list, blank=True)
+    strategy_reasoning   = models.TextField(blank=True, default='')
+
+    status        = models.CharField(max_length=2, choices=STATUS_CHOICES, default='p')
+    error_message = models.TextField(blank=True)
+    submitted_at  = models.DateTimeField(default=timezone.now)
+    completed_at  = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        ordering = ['epub', 'order']
-        unique_together = ['epub', 'order']
+        ordering = ['-submitted_at']
 
     def __str__(self):
-        return f"{self.epub.original_filename} - {self.title}"
+        return f"{self.title} ({self.get_media_type_display()}) [{self.get_status_display()}]"
 
 
 class Character(models.Model):
-    epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE, related_name='characters')
-    name = models.CharField(max_length=200)
-    syntactic_score = models.IntegerField(default=0)
-    aliases = models.JSONField(default=list)
+    media         = models.ForeignKey(MediaRequest, on_delete=models.CASCADE, related_name='characters')
+    name          = models.CharField(max_length=200)
+    aliases       = models.JSONField(default=list)
+    description   = models.TextField(blank=True)
+    image_url     = models.URLField(blank=True)
+    wiki_page     = models.URLField(blank=True)
     mention_count = models.IntegerField(default=0)
-    first_appearance_chapter = models.IntegerField(null=True)
 
     class Meta:
-        ordering = ['-mention_count']
-        unique_together = ['epub', 'name']
+        ordering        = ['-mention_count']
+        unique_together = ['media', 'name']
 
     def __str__(self):
-        return f"{self.name}"
+        return self.name
 
-class Chapter(models.Model):
-    epub = models.ForeignKey(
-        EpubFile,
-        on_delete=models.CASCADE,
-        related_name='chapters'
-    )
-    section = models.ForeignKey(
-        Section,
-        on_delete=models.CASCADE,
-        related_name='chapters',
-        null=True,
-        blank=True
-    )
-    title = models.CharField(max_length=500, blank=True)
-    content = models.TextField()
-    chapter_number = models.IntegerField()
-    annotated_sentences = models.JSONField(default=list, blank=True)
-
-    narrators = models.ManyToManyField(
-        Character,
-        related_name='narrated_chapters',
-        blank=True
-    )
-
-    class Meta:
-        ordering = ['epub', 'section__order', 'chapter_number']
-        unique_together = ['epub', 'section', 'chapter_number']
-
-    def __str__(self):
-        if self.section:
-            return f"{self.section.title} - Chapter {self.chapter_number}"
-        return f"{self.epub.original_filename} - Chapter {self.chapter_number}"
-
-class LabeledSentence(models.Model):
-    epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE, related_name='labeled_sentences', null=True, blank=True)
-    text = models.TextField()
-    entities = models.JSONField(
-        default=list,
-        help_text="""
-        spaCy-compatible span format:
-        [{"start": 0, "end": 5, "label": "PERSON"}, ...]
-        """
-    )
-    source = models.CharField(max_length=100, blank=True, help_text="Book title or origin")
-    labeled_by = models.CharField(max_length=100, blank=True)
-    labeled_at = models.DateTimeField(auto_now_add=True)
-    is_reviewed = models.BooleanField(default=False)
-
-    def __str__(self):
-        return self.text[:60]
 
 class Relationship(models.Model):
-    epub = models.ForeignKey(EpubFile, on_delete=models.CASCADE, related_name='relationships')
-    character_1 = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_1')
-    character_2 = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_2')
-    relationship_type = models.CharField(max_length=100)
-    confidence = models.FloatField(default=0.0)
-    # More detailed subtype returned by the LLM
-    relationship_subtype = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True,
-        help_text="More specific relationship label (brother, captor, rival, etc)"
-    )
+    media        = models.ForeignKey(MediaRequest, on_delete=models.CASCADE, related_name='relationships')
+    character_1  = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_1')
+    character_2  = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_2')
 
-    evidence = models.JSONField(
-        default=list,
-        blank=True,
-        help_text="""
-        List of evidence objects:
-        [
-            {
-                "chapter": int,
-                "specific_type": str,
-                "confidence": float,
-                "chunks": [
-                    {
-                        "context": str,
-                        "characters_in_context": [str],
-                        "sentence_index": int
-                    }
-                ]
-            }
-        ]
-        """
-    )
-
+    relationship_type    = models.CharField(max_length=100)
+    relationship_subtype = models.CharField(max_length=100, blank=True)
+    confidence           = models.FloatField(default=0.0)
+    evidence             = models.JSONField(default=list, blank=True)
 
     class Meta:
-        unique_together = ['epub', 'character_1', 'character_2', 'relationship_type']
+        unique_together = ['media', 'character_1', 'character_2', 'relationship_type']
 
     def __str__(self):
-        return f"{self.character_1.name} - {self.relationship_type} - {self.character_2.name}"
+        return f"{self.character_1.name} —[{self.relationship_type}]→ {self.character_2.name}"
