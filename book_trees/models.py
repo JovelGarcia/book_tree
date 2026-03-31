@@ -73,17 +73,17 @@ class Character(models.Model):
 
 
 class Relationship(models.Model):
-    media        = models.ForeignKey(MediaRequest, on_delete=models.CASCADE, related_name='relationships')
-    character_1  = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_1')
-    character_2  = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='relationships_as_character_2')
-
-    relationship_type    = models.CharField(max_length=100)
-    relationship_subtype = models.CharField(max_length=100, blank=True)
-    confidence           = models.FloatField(default=0.0)
-    evidence             = models.JSONField(default=list, blank=True)
+    media  = models.ForeignKey('MediaRequest', on_delete=models.CASCADE,
+                               related_name='relationships')
+    source = models.ForeignKey('Character', on_delete=models.CASCADE,
+                               related_name='outgoing_rels', default='')
+    target = models.ForeignKey('Character', on_delete=models.CASCADE,
+                               related_name='incoming_rels', default='')
+    relationship_type = models.CharField(max_length=50)
+    description       = models.TextField(blank=True, default='')
 
     class Meta:
-        unique_together = ['media', 'character_1', 'character_2', 'relationship_type']
+        unique_together = ('media', 'source', 'target')
 
     def __str__(self):
-        return f"{self.character_1.name} —[{self.relationship_type}]→ {self.character_2.name}"
+        return f"{self.source.name} → {self.target.name} ({self.relationship_type})"

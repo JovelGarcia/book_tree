@@ -21,7 +21,7 @@ class CharacterAdmin(admin.ModelAdmin):
 
 @admin.register(Relationship)
 class RelationshipAdmin(admin.ModelAdmin):
-    list_display  = ['character_1', 'character_2', 'relationship_type', 'confidence']
+    list_display  = ['source', 'target', 'relationship_type', 'description']
     list_filter   = ['media', 'relationship_type']
-    search_fields = ['character_1__name', 'character_2__name']
-    readonly_fields = ['media', 'character_1', 'character_2']
+    search_fields = ['source__name', 'source__name']
+    readonly_fields = ['media', 'source', 'target']

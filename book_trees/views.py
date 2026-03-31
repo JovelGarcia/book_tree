@@ -5,6 +5,7 @@ from rest_framework import status
 from .models import MediaRequest, Character, Relationship
 from .serializers import MediaRequestSerializer, CharacterSerializer, RelationshipSerializer
 from .agent import run_media_agent
+from .relationship_graph import run_relationship_extraction
 
 @api_view(['GET'])
 def media_list_api(request):
@@ -21,6 +22,7 @@ def media_submit_api(request):
     instance = serializer.save()
     run_media_agent(instance.id)   # synchronous for now
 
+    run_relationship_extraction(instance.id)
     return Response(MediaRequestSerializer(instance).data, status=status.HTTP_201_CREATED)
 
 @api_view(['GET'])

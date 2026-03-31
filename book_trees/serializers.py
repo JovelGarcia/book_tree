@@ -28,14 +28,14 @@ class CharacterSerializer(serializers.ModelSerializer):
 
 
 class RelationshipSerializer(serializers.ModelSerializer):
-    source = serializers.IntegerField(source='character_1_id', read_only=True)
-    target = serializers.IntegerField(source='character_2_id', read_only=True)
-    source_name = serializers.CharField(source='character_1.name', read_only=True)
-    target_name = serializers.CharField(source='character_2.name', read_only=True)
+    source      = serializers.IntegerField(source='source_id',    read_only=True)
+    target      = serializers.IntegerField(source='target_id',    read_only=True)
+    source_name = serializers.CharField(source='source.name',     read_only=True)
+    target_name = serializers.CharField(source='target.name',     read_only=True)
 
     class Meta:
         model  = Relationship
         fields = [
             'id', 'source', 'target', 'source_name', 'target_name',
-            'relationship_type', 'relationship_subtype', 'confidence',
+            'relationship_type', 'description',
         ]
