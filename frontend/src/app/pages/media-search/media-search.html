@@ -114,25 +114,6 @@
     </section>
   }
 
-  <!-- ══ PAST JOBS ════════════════════════════════════════════════════════ -->
-  @if (pastJobs().length > 0) {
-    <section class="history">
-      <h3 class="history__heading">Previous graphs</h3>
-      <ul class="history-list">
-        @for (j of pastJobs(); track j.id) {
-          <li class="history-item">
-            <div class="history-item__info">
-              <span class="history-item__title">{{ j.title }}</span>
-              <span class="history-item__type">{{ j.media_type_display }}</span>
-            </div>
-            <span [class]="statusClass(j.status)">{{ j.status_display }}</span>
-            @if (j.status === 'c') {
-              <a class="history-item__link" [href]="graphUrl(j)">View →</a>
-            }
-          </li>
-        }
-      </ul>
-    </section>
-  }
+  <app-media-list />
 
 </div>

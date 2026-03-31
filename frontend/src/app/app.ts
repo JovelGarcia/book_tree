@@ -1,10 +1,10 @@
 import { Component } from '@angular/core';
-import { MediaSearch } from './pages/media-search/media-search';
+import { RouterOutlet } from '@angular/router';
 
 @Component({
   selector:   'app-root',
   standalone: true,
-  imports:    [MediaSearch],
-  template:   `<app-media-search />`,
+  imports:    [RouterOutlet],
+  template:   `<router-outlet />`,
 })
 export class App {}

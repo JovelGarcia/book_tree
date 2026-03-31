@@ -50,10 +50,12 @@
   gap: 1.25rem;
 }
 
+/* FIX: was inheriting near-black from a browser default on some builds */
 .card__title {
   font-size: 1.1rem;
   font-weight: 700;
   margin: 0;
+  color: var(--color-text, #e8e8f0);
 }
 
 /* ── Form fields ─────────────────────────────────────────────────────────── */
@@ -77,7 +79,9 @@
   border-radius: 10px;
   padding: 0.75rem 1rem;
   font-size: 1rem;
-  color: inherit;
+  /* FIX: explicitly set text and caret color so they don't fall back to black */
+  color: var(--color-text, #e8e8f0);
+  caret-color: var(--color-accent, #7c6dfa);
   outline: none;
   transition: border-color 0.15s;
   width: 100%;
@@ -172,6 +176,7 @@
   font-size: 1.1rem;
   font-weight: 700;
   margin: 0;
+  color: var(--color-text, #e8e8f0);
 }
 
 .status-card__type {
@@ -253,7 +258,7 @@
 }
 
 .history-item__info { flex: 1; display: flex; flex-direction: column; gap: 0.1rem; }
-.history-item__title { font-size: 0.88rem; font-weight: 500; }
+.history-item__title { font-size: 0.88rem; font-weight: 500; color: var(--color-text, #e8e8f0); }
 .history-item__type  { font-size: 0.72rem; color: var(--color-muted, #6b6b8a); }
 
 .history-item__link {
@@ -282,7 +287,7 @@
   box-sizing: border-box;
 }
 
-.btn--full   { width: 100%; }
+.btn--full    { width: 100%; }
 .btn--primary { background: var(--color-accent, #7c6dfa); color: #fff; }
 .btn--primary:hover:not(:disabled) { filter: brightness(1.18); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }

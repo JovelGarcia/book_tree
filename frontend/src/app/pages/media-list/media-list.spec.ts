@@ -1,18 +1,18 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
-import { EpubList } from './epub-list';
+import { MediaList } from './media-list';
 
-describe('EpubList', () => {
-  let component: EpubList;
-  let fixture: ComponentFixture<EpubList>;
+describe('MediaList', () => {
+  let component: MediaList;
+  let fixture: ComponentFixture<MediaList>;
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      imports: [EpubList]
+      imports: [MediaList]
     })
     .compileComponents();
 
-    fixture = TestBed.createComponent(EpubList);
+    fixture = TestBed.createComponent(MediaList);
     component = fixture.componentInstance;
     await fixture.whenStable();
   });

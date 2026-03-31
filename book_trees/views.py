@@ -69,3 +69,8 @@ def relationship_list_api(request, id):
     except MediaRequest.DoesNotExist:
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     return Response(RelationshipSerializer(media.relationships.all(), many=True).data)
+
+@api_view(['GET'])
+def media_recent_api(request):
+    qs = MediaRequest.objects.order_by('-submitted_at')[:5]
+    return Response(MediaRequestSerializer(qs, many=True).data)

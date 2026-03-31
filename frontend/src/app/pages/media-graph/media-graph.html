@@ -1,0 +1,60 @@
+<div class="graph-page">
+
+  <!-- header -->
+  <header class="graph-header">
+    <button class="btn" (click)="goBack()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+      </svg>
+      Back
+    </button>
+
+    <div class="media-info" *ngIf="mediaTitle()">
+      <span class="media-title">{{ mediaTitle() }}</span>
+      <a
+        *ngIf="fandomUrl()"
+        class="fandom-link"
+        [href]="fandomUrl()"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M14 3h7v7h-2V6.41l-9.29 9.3-1.42-1.42L17.59 5H14V3zM5 5h6V3H5C3.9 3 3 3.9 3 5v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-6h-2v6H5V5z"/>
+        </svg>
+        Fandom Wiki
+      </a>
+    </div>
+
+    <div class="header-spacer"></div>
+
+    <button class="btn" (click)="fitGraph()" *ngIf="!loading() && !error()">
+      ⊡ Fit
+    </button>
+  </header>
+
+  <!-- graph + overlays -->
+  <div class="graph-body">
+    <div #container class="graph-container"></div>
+
+    <div class="overlay" *ngIf="loading()">
+      <div class="spinner"></div>
+      <p>Loading relationships…</p>
+    </div>
+
+    <div class="overlay" *ngIf="error()">
+      <p class="error-msg">{{ error() }}</p>
+      <button class="btn" (click)="goBack()">← Go Back</button>
+    </div>
+  </div>
+
+  <!-- legend -->
+  <div class="legend" *ngIf="!loading() && !error() && legend().length">
+    <div class="legend-row" *ngFor="let e of legend()">
+      <span class="legend-dot" [style.background]="e.color"></span>
+      {{ e.type }}
+    </div>
+  </div>
+
+  <!-- tooltip -->
+  <div #tip class="graph-tooltip"></div>
+</div>

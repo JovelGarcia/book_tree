@@ -32,8 +32,8 @@ from .models import Character, MediaRequest, Relationship
 HEADERS        = {'User-Agent': 'FandomGraphBot/1.0 (educational project; contact via GitHub)'}
 CALL_DELAY     = 0.5          # seconds between Fandom API calls (sequential pre-fetch)
 MAX_PAGE_CHARS = 30_000       # truncation limit per page before sending to the LLM
-WORKER_MODEL   = "claude-sonnet-4-20250514"
-SYNTH_MODEL    = "claude-sonnet-4-20250514"
+WORKER_MODEL   = "claude-haiku-4-5-20251001"
+SYNTH_MODEL    = "claude-sonnet-4-6"
 MIN_FUZZY_LEN  = 3            # minimum name length for substring matching
 MAX_CONCURRENT_WORKERS = 3
 _worker_semaphore = threading.Semaphore(MAX_CONCURRENT_WORKERS)
@@ -323,16 +323,9 @@ EXTRACT_RELATIONSHIPS_TOOL = {
                     },
                     "required": ["target", "relationship_type", "description"],
                 },
-            },
-            "scope_adherence_note": {
-                "type": "string",
-                "description": (
-                    "Brief note on how you identified scope boundaries and "
-                    "which page sections you included or excluded."
-                ),
-            },
+            }
         },
-        "required": ["relationships", "scope_adherence_note"],
+        "required": ["relationships"],
     },
 }
 
@@ -581,11 +574,10 @@ INSTRUCTIONS:
 
             tool_input = next(b.input for b in message.content if b.type == "tool_use")
             raw_rels   = tool_input["relationships"]
-            scope_note = tool_input["scope_adherence_note"]
 
             print(
                 f"[INFO] [{media_id}] Worker: {char_name} → "
-                f"{len(raw_rels)} relationship(s). Scope note: {scope_note}"
+                f"{len(raw_rels)} relationship(s)."
             )
 
             typed_rels: list[ExtractedRelationship] = [

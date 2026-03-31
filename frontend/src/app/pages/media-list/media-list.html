@@ -1,0 +1,32 @@
+<section class="media-list" *ngIf="!loading() && jobs().length > 0">
+  <h2 class="media-list__heading">
+    <span class="media-list__heading-icon">🕐</span>
+    Recent Searches
+  </h2>
+
+  <p *ngIf="error()" class="alert alert--error">{{ error() }}</p>
+
+  <ul class="media-list__items" role="list">
+    <li
+      *ngFor="let job of jobs(); trackBy: trackById"
+      class="media-list__item"
+    >
+      <div class="media-list__item-left">
+        <span class="media-list__item-title">{{ job.title }}</span>
+        <span class="media-list__item-type">{{ job.media_type_display }}</span>
+      </div>
+
+      <div class="media-list__item-right">
+        <span [class]="statusClass(job.status)">{{ job.status_display }}</span>
+
+        <a
+          *ngIf="job.status === 'c'"
+          [routerLink]="graphUrl(job)"
+          class="btn btn--ghost btn--sm"
+        >
+          View graph →
+        </a>
+      </div>
+    </li>
+  </ul>
+</section>

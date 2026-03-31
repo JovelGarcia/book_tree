@@ -4,6 +4,9 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Subscription, interval } from 'rxjs';
 import { switchMap, takeWhile } from 'rxjs/operators';
+import { Router } from '@angular/router';
+import { MediaList } from '../media-list/media-list';
+
 
 export type MediaType = 'anime' | 'tv' | 'movie' | 'game' | 'book';
 
@@ -39,7 +42,7 @@ const EXAMPLES: { title: string; type: MediaType }[] = [
 @Component({
   selector:    'app-media-search',
   standalone:  true,
-  imports:     [CommonModule, FormsModule],
+  imports:     [CommonModule, FormsModule, MediaList],
   templateUrl: './media-search.html',
   styleUrl:    './media-search.css',
 })
@@ -60,7 +63,8 @@ export class MediaSearch implements OnDestroy {
   private readonly API  = '/api/media/';
   private pollSub?: Subscription;
 
-  constructor(private http: HttpClient) {}
+
+  constructor(private http: HttpClient, private router: Router) {}
 
   // ── Form ────────────────────────────────────────────────────────────────
 
@@ -90,12 +94,14 @@ export class MediaSearch implements OnDestroy {
     }).subscribe({
       next: job => {
         this.job.set(job);
-        this.submitting.set(false);
-        this.startPolling(job.id);
-      },
-      error: err => {
-        this.error.set(err.error?.error ?? 'Submission failed. Please try again.');
-        this.submitting.set(false);
+        if (job.status === 'c') {
+          this.pastJobs.update(list => [job, ...list.filter(j => j.id !== job.id)]);
+          this.stopPolling();
+          this.router.navigate(['/epubs', job.id, 'relationships']);
+        } else if (job.status === 'f') {
+          this.pastJobs.update(list => [job, ...list.filter(j => j.id !== job.id)]);
+          this.stopPolling();
+        }
       },
     });
   }
@@ -132,7 +138,7 @@ export class MediaSearch implements OnDestroy {
   }
 
   graphUrl(job: MediaJob): string {
-    return `/graph/${job.id}`;
+    return `/epubs/${job.id}/relationships`;
   }
 
   statusClass(s: MediaJob['status']): string {
