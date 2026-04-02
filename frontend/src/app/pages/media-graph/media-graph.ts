@@ -46,15 +46,17 @@ interface GLink extends d3.SimulationLinkDatum<GNode> {
 // ─── Edge palette ───────────────────────────────────────────────
 
 const PALETTE: Record<string, string> = {
-  family:       '#f59e0b',
-  romantic:     '#ec4899',
-  ally:         '#22c55e',
-  enemy:        '#ef4444',
-  mentor:       '#8b5cf6',
-  rival:        '#f97316',
-  friend:       '#06b6d4',
-  political:    '#6366f1',
-  professional: '#14b8a6',
+  family:       '#f59e0b',   // amber
+  romantic:     '#ec4899',   // pink
+  ally:         '#22c55e',   // green
+  enemy:        '#ef4444',   // red
+  mentor:       '#8b5cf6',   // violet
+  rival:        '#ff3d6b',   // hot coral-red (distinct from amber family)
+  friend:       '#06b6d4',   // cyan
+  political:    '#6366f1',   // indigo
+  professional: '#14b8a6',   // teal
+  acquaintance: '#e879f9',   // fuchsia (distinct from all above)
+  subordinate:  '#facc15',   // yellow (distinct from amber family)
 };
 const FALLBACK_CLR = '#64748b';
 const clr = (t: string) => PALETTE[t?.toLowerCase()] ?? FALLBACK_CLR;
@@ -223,23 +225,54 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
 
     nodeSel.append('circle')
       .attr('r',            rFn)
-      .attr('fill',         '#6366f1')
-      .attr('stroke',       '#312e81')
+      .attr('fill',         '#9aa3b2')
+      .attr('stroke',       '#4b5263')
       .attr('stroke-width', 1.5);
 
     nodeSel.append('text')
       .text(d => d.name)
-      .attr('dx', d => rFn(d) + 4)
-      .attr('dy', '0.35em')
+      .attr('text-anchor', 'middle')
+      .attr('dx', 0)
+      .attr('dy', d => rFn(d) + 13)
       .attr('font-size',     '11px')
       .attr('fill',          '#cbd5e1')
       .attr('pointer-events','none');
 
+    // ── hover: fade non-connected nodes/edges ────────────────
+    const connectedIds = (d: GNode): Set<number> => {
+      const ids = new Set<number>();
+      links.forEach(l => {
+        const s = (l.source as GNode).id;
+        const t = (l.target as GNode).id;
+        if (s === d.id) ids.add(t);
+        if (t === d.id) ids.add(s);
+      });
+      return ids;
+    };
+
     nodeSel
-      .on('pointerenter', (ev: PointerEvent, d) =>
-        this.showTip(tip, ev, d.name, `${d.deg} connection${d.deg !== 1 ? 's' : ''}`, ''))
+      .on('pointerenter', (ev: PointerEvent, d) => {
+        const neighbors = connectedIds(d);
+        // fade unrelated nodes
+        nodeSel.attr('opacity', n => (n.id === d.id || neighbors.has(n.id)) ? 1 : 0.08);
+        // fade unrelated edges
+        linkSel.attr('stroke-opacity', l => {
+          const s = (l.source as GNode).id;
+          const t = (l.target as GNode).id;
+          return (s === d.id || t === d.id) ? 0.9 : 0.04;
+        }).attr('stroke-width', l => {
+          const s = (l.source as GNode).id;
+          const t = (l.target as GNode).id;
+          return (s === d.id || t === d.id) ? 2.5 : 1.5;
+        });
+        this.showTip(tip, ev, d.name, `${d.deg} connection${d.deg !== 1 ? 's' : ''}`, '');
+      })
       .on('pointermove',  (ev: PointerEvent) => this.moveTip(tip, ev))
-      .on('pointerleave', () => this.hideTip(tip));
+      .on('pointerleave', () => {
+        nodeSel.attr('opacity', 1);
+        linkSel.attr('stroke-opacity', 0.45).attr('stroke-width', 1.5);
+        this.hideTip(tip);
+      });
 
     /* ─── force sim ─── forces target canvas center (cx0, cy0) ── */
     this.sim = d3.forceSimulation<GNode, GLink>(nodes)
