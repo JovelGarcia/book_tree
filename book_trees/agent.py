@@ -763,8 +763,17 @@ def scrape_characters(state: AgentState) -> AgentState:
         character_names = []
 
         for m in all_members:
-            name      = m['title']
-            wiki_page = f"https://{slug}.fandom.com/wiki/{name.replace(' ', '_')}"
+            raw_name = m['title']
+
+            # Skip placeholder "Unnamed ..." entries
+            if re.match(r'unnamed\b', raw_name, re.IGNORECASE):
+                print(f"[DEBUG] [{media_id}] Skipping unnamed entry: {raw_name!r}")
+                continue
+
+            # Strip parenthetical disambiguation, e.g. "Yurga (Knight)" → "Yurga"
+            name = re.sub(r'\s*\(.*?\)\s*$', '', raw_name).strip()
+
+            wiki_page = f"https://{slug}.fandom.com/wiki/{raw_name.replace(' ', '_')}"
             Character.objects.update_or_create(
                 media=media,
                 name=name,
