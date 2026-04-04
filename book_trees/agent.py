@@ -75,6 +75,10 @@ class AgentState(TypedDict):
     metadata_categories: list[str]
     resolution_strategy: ResolutionStrategy | None
     character_names:     list[dict]
+    # Presentational metadata (best-effort; never block the pipeline)
+    release_year:        str | None
+    creators:            list[str]
+    genres:              list[str]
     error:               str | None
 
 
@@ -396,6 +400,145 @@ PICK_WIKI_TOOL = {
         "required": ["chosen_slug", "is_umbrella_wiki", "reasoning"],
     },
 }
+
+
+# ── Node 1b: fetch_media_metadata ────────────────────────────────────────────
+#
+# Best-effort: scrapes the title's main wiki article for a handful of
+# presentational fields (release year, creator/author/director, genres).
+# Never blocks the pipeline — any failure is silently swallowed.
+
+_YEAR_RE      = re.compile(r'\b(19|20)\d{2}\b')
+_INFOBOX_KV   = re.compile(r'\|\s*([a-z_ ]+?)\s*=\s*(.+)', re.IGNORECASE)
+_WIKILINK_RE  = re.compile(r'\[\[(?:[^|\]]*\|)?([^\]]+)\]\]')
+_TEMPLATE_RE  = re.compile(r'\{\{[^}]*\}\}')
+_HTML_TAG_RE  = re.compile(r'<[^>]+>')
+
+_CREATOR_KEYS = frozenset({
+    'author', 'authors', 'writer', 'writers', 'creator', 'creators',
+    'director', 'directors', 'developer', 'developers', 'publisher',
+    'created by', 'written by', 'directed by',
+})
+_GENRE_KEYS = frozenset({
+    'genre', 'genres',
+})
+_YEAR_KEYS = frozenset({
+    'first aired', 'first_aired', 'premiere', 'premiered', 'released',
+    'release date', 'release_date', 'published', 'pub_date',
+    'original run', 'original_run', 'years', 'year',
+})
+
+
+def _clean_wikitext(raw: str) -> str:
+    """Strip wikitext markup and return plain text."""
+    s = _WIKILINK_RE.sub(r'\1', raw)
+    s = _TEMPLATE_RE.sub('', s)
+    s = _HTML_TAG_RE.sub('', s)
+    return s.strip(' \t|[]\'\"')
+
+
+def _split_list_field(raw: str) -> list[str]:
+    """Split a wikitext list field on common delimiters and clean each item."""
+    cleaned = _clean_wikitext(raw)
+    parts   = re.split(r'[,;<>\n•]+', cleaned)
+    return [p.strip() for p in parts if p.strip()][:6]  # cap at 6 items
+
+
+def fetch_media_metadata(state: AgentState) -> AgentState:
+    """
+    Fetch presentational metadata from the chosen wiki's main article for the
+    title.  Populates state['release_year'], state['creators'], state['genres'].
+    Errors are swallowed — this node never sets state['error'].
+    """
+    slug     = state.get('wiki_slug', '')
+    title    = state['title']
+    media_id = state['media_id']
+
+    empty = {**state, 'release_year': None, 'creators': [], 'genres': []}
+
+    if not slug:
+        return empty
+
+    try:
+        # Query the wiki article for the title
+        r = _get(_api(slug), params={
+            'action':    'query',
+            'titles':    title,
+            'prop':      'revisions',
+            'rvprop':    'content',
+            'rvslots':   'main',
+            'format':    'json',
+            'redirects': 1,
+        })
+        if not r.ok:
+            print(f"[INFO] [{media_id}] fetch_media_metadata: HTTP {r.status_code} — skipping")
+            return empty
+
+        data  = r.json()
+        pages = data.get('query', {}).get('pages', {})
+        page  = next(iter(pages.values()), {})
+
+        wikitext: str = (
+            page
+            .get('revisions', [{}])[0]
+            .get('slots', {})
+            .get('main', {})
+            .get('*', '')
+        )
+
+        if not wikitext:
+            print(f"[INFO] [{media_id}] fetch_media_metadata: empty wikitext — skipping")
+            return empty
+
+        # Parse infobox key-value pairs
+        release_year: str | None  = None
+        creators:     list[str]   = []
+        genres:       list[str]   = []
+
+        for match in _INFOBOX_KV.finditer(wikitext):
+            key = match.group(1).strip().lower()
+            val = match.group(2).strip()
+
+            if not val or val.startswith('{{') and val.count('}}') == 0:
+                continue  # skip unclosed templates
+
+            if key in _YEAR_KEYS and release_year is None:
+                year_hit = _YEAR_RE.search(val)
+                if year_hit:
+                    release_year = year_hit.group(0)
+
+            elif key in _CREATOR_KEYS and not creators:
+                creators = _split_list_field(val)
+
+            elif key in _GENRE_KEYS and not genres:
+                genres = _split_list_field(val)
+
+        # Fallback: scan full wikitext for a year if infobox had none
+        if release_year is None:
+            year_hit = _YEAR_RE.search(wikitext[:2000])
+            if year_hit:
+                release_year = year_hit.group(0)
+
+        print(
+            f"[INFO] [{media_id}] Metadata — year={release_year!r} "
+            f"creators={creators} genres={genres}"
+        )
+
+        # Persist to DB (best-effort — fields must exist on the model)
+        try:
+            MediaRequest.objects.filter(id=media_id).update(
+                release_year=release_year or '',
+                creators=creators,
+                genres=genres,
+            )
+        except Exception as db_exc:
+            print(f"[WARNING] [{media_id}] Could not save metadata to DB: {db_exc}")
+
+        return {**state, 'release_year': release_year, 'creators': creators, 'genres': genres}
+
+    except Exception as exc:
+        print(f"[INFO] [{media_id}] fetch_media_metadata failed ({exc}) — continuing without metadata")
+        return empty
 
 
 # ── Node 2: claude_pick_wiki ──────────────────────────────────────────────────
@@ -865,6 +1008,7 @@ def build_graph() -> StateGraph:
 
     g.add_node('search_wiki_candidates', search_wiki_candidates)
     g.add_node('claude_pick_wiki',       claude_pick_wiki)
+    g.add_node('fetch_media_metadata',   fetch_media_metadata)
     g.add_node('fetch_categories',       fetch_categories)
     g.add_node('claude_pick_category',   claude_pick_category)
     g.add_node('scrape_characters',      scrape_characters)
@@ -874,11 +1018,16 @@ def build_graph() -> StateGraph:
 
     g.set_entry_point('search_wiki_candidates')
 
+    # search → pick_wiki → fetch_metadata (best-effort, no error routing needed)
+    # → fetch_categories → pick_category
     for src, dst in [
         ('search_wiki_candidates', 'claude_pick_wiki'),
-        ('claude_pick_wiki',       'fetch_categories'),
+        ('claude_pick_wiki',       'fetch_media_metadata'),
+        ('fetch_media_metadata',   'fetch_categories'),
         ('fetch_categories',       'claude_pick_category'),
     ]:
+        # fetch_media_metadata never sets error, but we still guard the
+        # surrounding nodes so error propagation is consistent.
         g.add_conditional_edges(src, route_on_error, {
             'continue':     dst,
             'handle_error': 'handle_error',
@@ -907,8 +1056,48 @@ graph = build_graph()
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def run_media_agent(media_id: int) -> None:
-    media        = MediaRequest.objects.get(id=media_id)
+def run_media_agent(media_id: int) -> int:
+    """
+    Run the FandomGraph pipeline for *media_id*.
+
+    Cache guard
+    -----------
+    Before invoking the (expensive) LangGraph pipeline, check whether a
+    *different* MediaRequest for the same title + media_type has already
+    completed successfully.  If one is found, mark the current request as a
+    duplicate (status='dup', pointing at the cached id) and return the cached
+    id so the caller can redirect the user straight to the existing graph.
+
+    Returns the media_id that holds the usable graph — either *media_id* itself
+    (new run) or the cached id (duplicate).
+    """
+    media = MediaRequest.objects.get(id=media_id)
+
+    # ── Cache check ───────────────────────────────────────────────────────────
+    cached = (
+        MediaRequest.objects
+        .filter(
+            title__iexact=media.title,
+            media_type=media.media_type,
+            status='c',
+        )
+        .exclude(id=media_id)
+        .order_by('-completed_at')
+        .first()
+    )
+
+    if cached:
+        print(
+            f"[INFO] [{media_id}] Cache hit — '{media.title}' ({media.media_type}) "
+            f"already completed as MediaRequest #{cached.id}. Skipping pipeline."
+        )
+        MediaRequest.objects.filter(id=media_id).update(
+            status='dup',
+            error_message=f"Duplicate of MediaRequest #{cached.id}",
+        )
+        return cached.id
+
+    # ── Fresh run ─────────────────────────────────────────────────────────────
     media.status = 'pr'
     media.save(update_fields=['status'])
 
@@ -925,5 +1114,10 @@ def run_media_agent(media_id: int) -> None:
         'metadata_categories': [],
         'resolution_strategy': None,
         'character_names':     [],
+        'release_year':        None,
+        'creators':            [],
+        'genres':              [],
         'error':               None,
     })
+
+    return media_id

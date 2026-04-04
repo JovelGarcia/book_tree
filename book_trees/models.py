@@ -11,12 +11,13 @@ class MediaRequest(models.Model):
         ('book',  'Book'),
     ]
     STATUS_CHOICES = [
-        ('p',  'Pending'),
-        ('pr', 'Processing'),
-        ('c',  'Completed'),
-        ('f',  'Failed'),
-        ('ns', 'Needs Scope'),       # dedicated wiki exists, but no title-scoped category
-        ('nc', 'No Category'),       # best wiki found, but zero character categories
+        ('p',   'Pending'),
+        ('pr',  'Processing'),
+        ('c',   'Completed'),
+        ('f',   'Failed'),
+        ('ns',  'Needs Scope'),
+        ('nc',  'No Category'),
+        ('dup', 'Duplicate'),   # cache hit — refer to cached request
     ]
     RESOLUTION_STRATEGY = [
         ('dedicated_scoped',   'Dedicated wiki, scoped category'),
@@ -29,8 +30,13 @@ class MediaRequest(models.Model):
     media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES)
 
     # Resolved once the task starts
-    wiki_slug  = models.CharField(max_length=255, blank=True)
-    wiki_url   = models.URLField(blank=True)
+    wiki_slug = models.CharField(max_length=255, blank=True)
+    wiki_url  = models.URLField(blank=True)
+
+    # Presentational metadata (best-effort, populated by fetch_media_metadata)
+    release_year = models.CharField(max_length=4,   blank=True, default='')
+    creators     = models.JSONField(default=list,   blank=True)
+    genres       = models.JSONField(default=list,   blank=True)
 
     # Strategy / category reasoning
     resolution_strategy = models.CharField(
@@ -39,11 +45,11 @@ class MediaRequest(models.Model):
         blank=True,
         default='',
     )
-    chosen_category      = models.CharField(max_length=500, blank=True, default='')
-    metadata_categories  = models.JSONField(default=list, blank=True)
-    strategy_reasoning   = models.TextField(blank=True, default='')
+    chosen_category     = models.CharField(max_length=500, blank=True, default='')
+    metadata_categories = models.JSONField(default=list,   blank=True)
+    strategy_reasoning  = models.TextField(blank=True, default='')
 
-    status        = models.CharField(max_length=2, choices=STATUS_CHOICES, default='p')
+    status        = models.CharField(max_length=3, choices=STATUS_CHOICES, default='p')
     error_message = models.TextField(blank=True)
     submitted_at  = models.DateTimeField(default=timezone.now)
     completed_at  = models.DateTimeField(null=True, blank=True)
