@@ -849,7 +849,7 @@ CONFLICTS TO RESOLVE:
             )
 
     # ── 7. Mark complete ─────────────────────────────────────────────────
-    media.status       = 'rd'
+    media.status       = 'c'
     media.completed_at = timezone.now()
     media.save(update_fields=['status', 'completed_at'])
 

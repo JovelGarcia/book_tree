@@ -1,11 +1,17 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from django.db.models import F
 
 from .models import MediaRequest, Character, Relationship
 from .serializers import MediaRequestSerializer, CharacterSerializer, RelationshipSerializer
 from .agent import run_media_agent
 from .relationship_graph import run_relationship_extraction
+
+
+def save(self, *args, **kwargs):
+    self.title = self.title.strip().title()
+    super().save(*args, **kwargs)
 
 @api_view(['GET'])
 def media_list_api(request):
@@ -70,7 +76,22 @@ def relationship_list_api(request, id):
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     return Response(RelationshipSerializer(media.relationships.all(), many=True).data)
 
+
 @api_view(['GET'])
 def media_recent_api(request):
-    qs = MediaRequest.objects.order_by('-submitted_at')[:5]
+    qs = MediaRequest.objects.order_by('-submitted_at')[:20]
     return Response(MediaRequestSerializer(qs, many=True).data)
+
+
+@api_view(['GET'])
+def media_popular_api(request):
+    qs = MediaRequest.objects.filter(status='c').order_by('-view_count')[:20]
+    return Response(MediaRequestSerializer(qs, many=True).data)
+
+
+@api_view(['POST'])
+def media_increment_view_api(request, id):
+    updated = MediaRequest.objects.filter(pk=id, status='c').update(view_count=F('view_count') + 1)
+    if not updated:
+        return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({'ok': True})

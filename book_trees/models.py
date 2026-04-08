@@ -53,6 +53,7 @@ class MediaRequest(models.Model):
     error_message = models.TextField(blank=True)
     submitted_at  = models.DateTimeField(default=timezone.now)
     completed_at  = models.DateTimeField(null=True, blank=True)
+    view_count = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ['-submitted_at']

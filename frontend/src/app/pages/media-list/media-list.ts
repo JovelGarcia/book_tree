@@ -1,4 +1,4 @@
-import { Component, OnInit, signal } from '@angular/core';
+import { Component, OnInit, signal, ElementRef, ViewChildren, QueryList, AfterViewInit } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
@@ -12,9 +12,10 @@ import { MediaJob } from '../media-search/media-search';
   styleUrl:    './media-list.css',
 })
 export class MediaList implements OnInit {
-  jobs    = signal<MediaJob[]>([]);
-  loading = signal(true);
-  error   = signal<string | null>(null);
+  recentJobs  = signal<MediaJob[]>([]);
+  popularJobs = signal<MediaJob[]>([]);
+  loading     = signal(true);
+  error       = signal<string | null>(null);
 
   private readonly API = '/api/media/';
 
@@ -23,7 +24,7 @@ export class MediaList implements OnInit {
   ngOnInit() {
     this.http.get<MediaJob[]>(`${this.API}recent/`).subscribe({
       next: jobs => {
-        this.jobs.set(jobs.slice(0, 5));
+        this.recentJobs.set(jobs.slice(0, 20));
         this.loading.set(false);
       },
       error: () => {
@@ -31,14 +32,24 @@ export class MediaList implements OnInit {
         this.loading.set(false);
       },
     });
+
+    this.http.get<MediaJob[]>(`${this.API}popular/`).subscribe({
+      next: jobs => this.popularJobs.set(jobs.slice(0, 20)),
+      error: () => {},
+    });
   }
 
-  statusClass(s: MediaJob['status']): string {
-    return `badge badge--${s}`;
+  scroll(rowEl: HTMLElement, direction: 'left' | 'right') {
+    const amount = 320;
+    rowEl.scrollBy({ left: direction === 'right' ? amount : -amount, behavior: 'smooth' });
   }
 
   graphUrl(job: MediaJob): string {
-    return `/epubs/${job.id}/relationships`;
+    return `/media/${job.id}/graph`;
+  }
+
+  isComplete(job: MediaJob): boolean {
+    return job.status === 'c';
   }
 
   trackById(_: number, job: MediaJob): number {
