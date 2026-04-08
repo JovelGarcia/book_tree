@@ -1,12 +1,17 @@
+# agent.py
 from __future__ import annotations
 
 import re
 import time
 import json
+import os
 from typing import Literal, TypedDict
 
 import requests
-from anthropic import Anthropic
+from difflib import SequenceMatcher
+from google import genai
+from google.genai import types as genai_types
+from google.genai import errors as genai_errors
 from django.utils import timezone
 from langgraph.graph import StateGraph, END
 
@@ -37,9 +42,13 @@ _MEDIA_TYPE_KW: dict[str, re.Pattern] = {
 }
 
 _BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
-_BRAVE_PAGE_SIZE = 5  # Brave returns up to 20 results per request on free tier
+_BRAVE_PAGE_SIZE = 5
 
-anthropic_client = Anthropic()
+AGENT_MODEL = "gemini-2.5-flash"
+
+# ── Gemini client (single instance reused across all nodes) ──────────────────
+_gemini_client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 # ── State ────────────────────────────────────────────────────────────────────
@@ -90,16 +99,40 @@ def _get(url: str, params: dict | None = None) -> requests.Response:
 def _api(slug: str) -> str:
     return f"https://{slug}.fandom.com/api.php"
 
+def _normalize(s: str) -> str:
+    """Strip everything that isn't a letter or digit, then lowercase.
+
+    This collapses ALL separator variations (•, ·, -, \\n, _, etc.)
+    so that 'WALL•E Characters', 'WALL-E Characters', and
+    'WALL\\nE Characters' all become 'wallecharacters'.
+    """
+    return re.sub(r'[^a-zA-Z0-9]', '', s).lower()
+
+
+def _best_fuzzy_match(
+    target: str,
+    candidates: list[str],
+    threshold: float = 0.55,
+) -> str | None:
+    """Return the candidate most similar to *target* after normalisation.
+
+    Returns None if even the best candidate is below *threshold*.
+    """
+    norm_target = _normalize(target)
+    scored = [
+        (c, SequenceMatcher(None, norm_target, _normalize(c)).ratio())
+        for c in candidates
+    ]
+    scored.sort(key=lambda t: t[1], reverse=True)
+    best, best_ratio = scored[0] if scored else (None, 0.0)
+    return best if best_ratio >= threshold else None
+
 
 # ── Brave Search API ──────────────────────────────────────────────────────────
 
 def _brave_search(query: str, api_key: str, count: int = 20) -> list[tuple[str, str, str]]:
     """
     Execute a Brave web search and return [(url, title, snippet), …].
-
-    Brave returns up to 20 results per request on the free tier (no pagination).
-    Raises RuntimeError on HTTP errors or unexpected response shapes.
-    Returns [] on a clean call that produced no results.
     """
     headers = {
         'Accept':               'application/json',
@@ -159,16 +192,7 @@ def _brave_search(query: str, api_key: str, count: int = 20) -> list[tuple[str, 
 def _brave_search_fandom(title: str) -> list[WikiCandidate]:
     """
     Walk _QUERY_TEMPLATES via the Brave Search API and return ranked
-    WikiCandidate objects. Stops at the first template that yields
-    fandom.com URLs.
-
-    Raises RuntimeError when:
-      • BRAVE_API_KEY is missing from settings, or
-      • every template failed with an API / network error, or
-      • every template returned 0 results.
-
-    Returns [] only when the API returned real URLs but none matched the
-    fandom slug pattern — likely a title-spelling issue.
+    WikiCandidate objects.
     """
     from django.conf import settings
 
@@ -195,7 +219,6 @@ def _brave_search_fandom(title: str) -> list[WikiCandidate]:
             results = _brave_search(query, api_key)
         except RuntimeError as exc:
             reason = str(exc)
-            # Auth errors are unrecoverable — no point trying further templates.
             if 'BRAVE_API_KEY' in reason or 'HTTP 401' in reason:
                 raise
             search_failures.append(f"{query!r} → {reason}")
@@ -295,7 +318,7 @@ def _brave_search_fandom(title: str) -> list[WikiCandidate]:
 def _filter_relevant_categories(
     all_cats: list[str],
     title: str,
-    media_type: str = '',       # ← NEW parameter
+    media_type: str = '',
 ) -> list[str]:
     title_lower = title.lower()
     no_article  = re.sub(r'^(the|a|an)\s+', '', title_lower).strip()
@@ -308,12 +331,11 @@ def _filter_relevant_categories(
         re.IGNORECASE,
     )
 
-    # Regex for the submitted media type, if we have one
     media_type_re: re.Pattern | None = _MEDIA_TYPE_KW.get(media_type.lower())
 
     title_cats      = []
     char_cats       = []
-    media_type_cats = []   # ← NEW bucket
+    media_type_cats = []
 
     for cat in all_cats:
         cat_lower = cat.lower()
@@ -327,12 +349,10 @@ def _filter_relevant_categories(
         if is_title_match:
             title_cats.append(cat)
         elif is_char_match and is_media_type_match:
-            # e.g. "Anime characters" when media_type='anime' — high value
             media_type_cats.append(cat)
         elif is_char_match:
             char_cats.append(cat)
 
-    # Priority: title-scoped > media-type+character > generic character
     return title_cats + media_type_cats + char_cats[:1000]
 
 
@@ -361,52 +381,56 @@ def search_wiki_candidates(state: AgentState) -> AgentState:
 
 
 # ── Tool schema: pick_wiki ────────────────────────────────────────────────────
-
-PICK_WIKI_TOOL = {
-    "name": "pick_wiki",
-    "description": (
-        "Select the single Fandom wiki that will yield the richest data "
-        "for this title, based on the aggregated search signals."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "chosen_slug": {
-                "type": "string",
-                "description": (
-                    "The slug of the chosen wiki (e.g. 'red-rising'). "
-                    "Must exactly match one of the slugs in the candidates list."
-                ),
-            },
-            "is_umbrella_wiki": {
-                "type": "boolean",
-                "description": (
-                    "True if this wiki hosts many unrelated franchises under one roof "
-                    "(e.g. movies.fandom.com, pixar.fandom.com, marvel.fandom.com). "
-                    "False if it is dedicated exclusively to this title's franchise. "
-                    "Infer this from the slug name, the page titles, and the snippets."
-                ),
-            },
-            "reasoning": {
-                "type": "string",
-                "description": (
-                    "Two or three sentences explaining the choice. "
-                    "Reference specific signals — result_count, has_character_category, "
-                    "page titles, or snippet content — to justify why this wiki is "
-                    "richer than the alternatives."
-                ),
-            },
-        },
-        "required": ["chosen_slug", "is_umbrella_wiki", "reasoning"],
-    },
-}
-
-
-# ── Node 1b: fetch_media_metadata ────────────────────────────────────────────
 #
-# Best-effort: scrapes the title's main wiki article for a handful of
-# presentational fields (release year, creator/author/director, genres).
-# Never blocks the pipeline — any failure is silently swallowed.
+# Converted from a raw dict to genai_types.Tool / FunctionDeclaration.
+# The logical structure (names, descriptions, required fields) is identical.
+# ─────────────────────────────────────────────────────────────────────────────
+
+PICK_WIKI_TOOL = genai_types.Tool(
+    function_declarations=[
+        genai_types.FunctionDeclaration(
+            name="pick_wiki",
+            description=(
+                "Select the single Fandom wiki that will yield the richest data "
+                "for this title, based on the aggregated search signals."
+            ),
+            parameters=genai_types.Schema(
+                type="OBJECT",
+                properties={
+                    "chosen_slug": genai_types.Schema(
+                        type="STRING",
+                        description=(
+                            "The slug of the chosen wiki (e.g. 'red-rising'). "
+                            "Must exactly match one of the slugs in the candidates list."
+                        ),
+                    ),
+                    "is_umbrella_wiki": genai_types.Schema(
+                        type="BOOLEAN",
+                        description=(
+                            "True if this wiki hosts many unrelated franchises under one roof "
+                            "(e.g. movies.fandom.com, pixar.fandom.com, marvel.fandom.com). "
+                            "False if it is dedicated exclusively to this title's franchise. "
+                            "Infer this from the slug name, the page titles, and the snippets."
+                        ),
+                    ),
+                    "reasoning": genai_types.Schema(
+                        type="STRING",
+                        description=(
+                            "Two or three sentences explaining the choice. "
+                            "Reference specific signals — result_count, has_character_category, "
+                            "page titles, or snippet content — to justify why this wiki is "
+                            "richer than the alternatives."
+                        ),
+                    ),
+                },
+                required=["chosen_slug", "is_umbrella_wiki", "reasoning"],
+            ),
+        )
+    ]
+)
+
+
+# ── Node 1b: fetch_media_metadata ─────────────────────────────────────────────
 
 _YEAR_RE      = re.compile(r'\b(19|20)\d{2}\b')
 _INFOBOX_KV   = re.compile(r'\|\s*([a-z_ ]+?)\s*=\s*(.+)', re.IGNORECASE)
@@ -441,13 +465,12 @@ def _split_list_field(raw: str) -> list[str]:
     """Split a wikitext list field on common delimiters and clean each item."""
     cleaned = _clean_wikitext(raw)
     parts   = re.split(r'[,;<>\n•]+', cleaned)
-    return [p.strip() for p in parts if p.strip()][:6]  # cap at 6 items
+    return [p.strip() for p in parts if p.strip()][:6]
 
 
 def fetch_media_metadata(state: AgentState) -> AgentState:
     """
-    Fetch presentational metadata from the chosen wiki's main article for the
-    title.  Populates state['release_year'], state['creators'], state['genres'].
+    Fetch presentational metadata from the chosen wiki's main article.
     Errors are swallowed — this node never sets state['error'].
     """
     slug     = state.get('wiki_slug', '')
@@ -460,7 +483,6 @@ def fetch_media_metadata(state: AgentState) -> AgentState:
         return empty
 
     try:
-        # Query the wiki article for the title
         r = _get(_api(slug), params={
             'action':    'query',
             'titles':    title,
@@ -490,7 +512,6 @@ def fetch_media_metadata(state: AgentState) -> AgentState:
             print(f"[INFO] [{media_id}] fetch_media_metadata: empty wikitext — skipping")
             return empty
 
-        # Parse infobox key-value pairs
         release_year: str | None  = None
         creators:     list[str]   = []
         genres:       list[str]   = []
@@ -500,7 +521,7 @@ def fetch_media_metadata(state: AgentState) -> AgentState:
             val = match.group(2).strip()
 
             if not val or val.startswith('{{') and val.count('}}') == 0:
-                continue  # skip unclosed templates
+                continue
 
             if key in _YEAR_KEYS and release_year is None:
                 year_hit = _YEAR_RE.search(val)
@@ -513,7 +534,6 @@ def fetch_media_metadata(state: AgentState) -> AgentState:
             elif key in _GENRE_KEYS and not genres:
                 genres = _split_list_field(val)
 
-        # Fallback: scan full wikitext for a year if infobox had none
         if release_year is None:
             year_hit = _YEAR_RE.search(wikitext[:2000])
             if year_hit:
@@ -524,7 +544,6 @@ def fetch_media_metadata(state: AgentState) -> AgentState:
             f"creators={creators} genres={genres}"
         )
 
-        # Persist to DB (best-effort — fields must exist on the model)
         try:
             MediaRequest.objects.filter(id=media_id).update(
                 release_year=release_year or '',
@@ -541,9 +560,9 @@ def fetch_media_metadata(state: AgentState) -> AgentState:
         return empty
 
 
-# ── Node 2: claude_pick_wiki ──────────────────────────────────────────────────
+# ── Node 2: gemini_pick_wiki ──────────────────────────────────────────────────
 
-def claude_pick_wiki(state: AgentState) -> AgentState:
+def gemini_pick_wiki(state: AgentState) -> AgentState:
     candidates = state['wiki_candidates']
 
     parts: list[str] = []
@@ -566,14 +585,16 @@ def claude_pick_wiki(state: AgentState) -> AgentState:
 
     candidate_block = "\n\n".join(parts)
 
-    message = anthropic_client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=512,
-        tools=[PICK_WIKI_TOOL],
-        tool_choice={"type": "tool", "name": "pick_wiki"},
-        messages=[{
+    # ── New SDK call ──────────────────────────────────────────────────────────
+    # • _gemini_client.models.generate_content() replaces GenerativeModel(...).generate_content()
+    # • contents uses the parts-dict format required by the new SDK
+    # • config bundles the tool + tool_config (mode=ANY forces a function call)
+    # ─────────────────────────────────────────────────────────────────────────
+    response = _gemini_client.models.generate_content(
+        model=AGENT_MODEL,
+        contents=[{
             "role": "user",
-            "content": f"""You are selecting the best Fandom wiki to scrape character data from.
+            "parts": [{"text": f"""You are selecting the best Fandom wiki to scrape character data from.
 
 Title     : {state['title']}
 Media type: {state['media_type']}
@@ -590,36 +611,45 @@ Selection criteria (priority order):
    that wiki, which strongly correlates with coverage depth.
 3. Prefer a wiki whose page titles and snippets are clearly about THIS specific
    title rather than a passing mention on a list page.
-4. Prefer a wiki that is about the title rather than a page dedicated to a chararcter.
+4. Prefer a wiki that is about the title rather than a page dedicated to a character.
 5. A dedicated single-franchise wiki beats an umbrella wiki when all other signals
    are equal, because its categories will be title-scoped by default.
 
 You MUST choose one of the slugs listed above.
-""",
+"""}],
         }],
+        config=genai_types.GenerateContentConfig(
+            tools=[PICK_WIKI_TOOL],
+            tool_config=genai_types.ToolConfig(
+                function_calling_config=genai_types.FunctionCallingConfig(
+                    mode="ANY",
+                )
+            ),
+        ),
     )
+    # ─────────────────────────────────────────────────────────────────────────
 
-    tool_input  = next(b.input for b in message.content if b.type == "tool_use")
+    tool_call  = response.candidates[0].content.parts[0].function_call
+    tool_input = dict(tool_call.args)
     chosen_slug = tool_input["chosen_slug"].strip()
     is_umbrella = tool_input["is_umbrella_wiki"]
     reasoning   = tool_input["reasoning"]
 
     candidate_map = {c['slug']: c for c in candidates}
     if chosen_slug not in candidate_map:
-        match = next(
-            (s for s in candidate_map if chosen_slug in s or s in chosen_slug), None
-        )
+        match = best_fuzzy_match(chosen_slug, list(candidate_map.keys()))
+
         if match:
             print(f"[INFO] [{state['media_id']}] Fuzzy matched slug {chosen_slug!r} → {match!r}")
             chosen_slug = match
         else:
             return {**state, 'error': (
-                f"Claude returned slug {chosen_slug!r} which is not in the candidate set: "
+                f"Gemini returned slug {chosen_slug!r} which is not in the candidate set: "
                 f"{list(candidate_map)}"
             )}
 
     chosen = candidate_map[chosen_slug]
-    print(f"[INFO] [{state['media_id']}] Claude chose {chosen_slug!r} (umbrella={is_umbrella}) — {reasoning}")
+    print(f"[INFO] [{state['media_id']}] Gemini chose {chosen_slug!r} (umbrella={is_umbrella}) — {reasoning}")
 
     MediaRequest.objects.filter(id=state['media_id']).update(
         wiki_slug=chosen_slug,
@@ -672,65 +702,80 @@ def fetch_categories(state: AgentState) -> AgentState:
 
 
 # ── Tool schema: pick_category ────────────────────────────────────────────────
+#
+# Converted from a raw dict to genai_types.Tool / FunctionDeclaration.
+# ─────────────────────────────────────────────────────────────────────────────
 
-PICK_CATEGORY_TOOL = {
-    "name": "pick_character_category",
-    "description": (
-        "Analyse the wiki's categories and classify the resolution strategy. "
-        "This determines both what to scrape and how to flag limitations."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "resolution_strategy": {
-                "type": "string",
-                "enum": [
-                    "dedicated_scoped",
-                    "umbrella_scoped",
-                    "dedicated_unscoped",
-                    "no_category",
+PICK_CATEGORY_TOOL = genai_types.Tool(
+    function_declarations=[
+        genai_types.FunctionDeclaration(
+            name="pick_character_category",
+            description=(
+                "Analyse the wiki's categories and classify the resolution strategy. "
+                "This determines both what to scrape and how to flag limitations."
+            ),
+            parameters=genai_types.Schema(
+                type="OBJECT",
+                properties={
+                    "resolution_strategy": genai_types.Schema(
+                        type="STRING",
+                        enum=[
+                            "dedicated_scoped",
+                            "umbrella_scoped",
+                            "dedicated_unscoped",
+                            "no_category",
+                        ],
+                        description=(
+                            "Classification of how character data is organised on this wiki:\n"
+                            "  dedicated_scoped   — dedicated wiki + a category scoped to THIS title's characters\n"
+                            "  umbrella_scoped    — umbrella wiki  + a category scoped to THIS title's characters\n"
+                            "  dedicated_unscoped — dedicated wiki but only wiki-wide categories exist\n"
+                            "  no_category        — no usable character category exists at all\n"
+                            "\n"
+                            "A category is 'scoped' if it is named after the specific title, film, book, or game. "
+                            "Generic wiki-level categories like 'Individuals' or 'Characters' are NOT scoped."
+                        ),
+                    ),
+                    "primary_category": genai_types.Schema(
+                        type="STRING",
+                        description=(
+                            "The single category that most directly and completely lists the main cast. "
+                            "Use an empty string if resolution_strategy is 'no_category'."
+                        ),
+                    ),
+                    "metadata_categories": genai_types.Schema(
+                        type="ARRAY",
+                        items=genai_types.Schema(type="STRING"),
+                        description=(
+                            "Other categories grouping characters by faction, race, organisation, "
+                            "allegiance, species, or affiliation. Empty list if none are relevant."
+                        ),
+                    ),
+                    "reasoning": genai_types.Schema(
+                        type="STRING",
+                        description=(
+                            "One or two sentences explaining the strategy classification "
+                            "and primary category choice."
+                        ),
+                    ),
+                },
+                required=[
+                    "resolution_strategy",
+                    "primary_category",
+                    "metadata_categories",
+                    "reasoning",
                 ],
-                "description": (
-                    "Classification of how character data is organised on this wiki:\n"
-                    "  dedicated_scoped   — dedicated wiki + a category scoped to THIS title's characters\n"
-                    "  umbrella_scoped    — umbrella wiki  + a category scoped to THIS title's characters\n"
-                    "  dedicated_unscoped — dedicated wiki but only wiki-wide categories exist\n"
-                    "  no_category        — no usable character category exists at all\n"
-                    "\n"
-                    "A category is 'scoped' if it is named after the specific title, film, book, or game. "
-                    "Generic wiki-level categories like 'Individuals' or 'Characters' are NOT scoped."
-                ),
-            },
-            "primary_category": {
-                "type": "string",
-                "description": (
-                    "The single category that most directly and completely lists the main cast. "
-                    "Use an empty string if resolution_strategy is 'no_category'."
-                ),
-            },
-            "metadata_categories": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Other categories grouping characters by faction, race, organisation, "
-                    "allegiance, species, or affiliation. Empty list if none are relevant."
-                ),
-            },
-            "reasoning": {
-                "type": "string",
-                "description": "One or two sentences explaining the strategy classification and primary category choice.",
-            },
-        },
-        "required": ["resolution_strategy", "primary_category", "metadata_categories", "reasoning"],
-    },
-}
+            ),
+        )
+    ]
+)
 
 
-# ── Node 4: claude_pick_category ──────────────────────────────────────────────
+# ── Node 4: gemini_pick_category ──────────────────────────────────────────────
 
-def claude_pick_category(state: AgentState) -> AgentState:
+def gemini_pick_category(state: AgentState) -> AgentState:
     all_cats   = state['all_categories']
-    media_type = state['media_type']          # ← already in state, just use it
+    media_type = state['media_type']
 
     if not all_cats:
         print(f"[INFO] [{state['media_id']}] No categories found on wiki, routing to no_category")
@@ -744,7 +789,6 @@ def claude_pick_category(state: AgentState) -> AgentState:
             'error':               None,
         }
 
-    # ↓ Pass media_type so the filter keeps "Anime characters" etc.
     filtered_cats = _filter_relevant_categories(all_cats, state['title'], media_type)
 
     if not filtered_cats:
@@ -764,14 +808,12 @@ def claude_pick_category(state: AgentState) -> AgentState:
 
     print(f"[INFO] [{state['media_id']}] Filtered {len(all_cats)} → {len(filtered_cats)} relevant categories")
 
-    message = anthropic_client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=768,
-        tools=[PICK_CATEGORY_TOOL],
-        tool_choice={"type": "tool", "name": "pick_character_category"},
-        messages=[{
+    # ── New SDK call ──────────────────────────────────────────────────────────
+    response = _gemini_client.models.generate_content(
+        model=AGENT_MODEL,
+        contents=[{
             "role": "user",
-            "content": f"""You are helping build a character relationship graph for a media title.
+            "parts": [{"text": f"""You are helping build a character relationship graph for a media title.
 
 Title     : {state['title']}
 Media type: {media_type}
@@ -806,25 +848,31 @@ Generic wiki-wide labels with NO title or media-type signal — such as bare
    Primary  : the broadest SCOPED category if one exists; otherwise the broadest
               generic character category; empty string only for no_category.
    Metadata : factions, races, organisations, allegiances, species. Empty list if none.
-""",
+"""}],
         }],
+        config=genai_types.GenerateContentConfig(
+            tools=[PICK_CATEGORY_TOOL],
+            tool_config=genai_types.ToolConfig(
+                function_calling_config=genai_types.FunctionCallingConfig(
+                    mode="ANY",
+                )
+            ),
+        ),
     )
+    # ─────────────────────────────────────────────────────────────────────────
 
-    tool_input = next(b.input for b in message.content if b.type == "tool_use")
+    tool_call  = response.candidates[0].content.parts[0].function_call
+    tool_input = dict(tool_call.args)
     strategy   = tool_input["resolution_strategy"]
     primary    = tool_input["primary_category"]
     metadata   = tool_input.get("metadata_categories", [])
     reasoning  = tool_input["reasoning"]
 
-    print(f"[INFO] [{state['media_id']}] Claude: strategy={strategy}, primary={primary!r} — {reasoning}")
+    print(f"[INFO] [{state['media_id']}] Gemini: strategy={strategy}, primary={primary!r} — {reasoning}")
 
     if primary:
         if primary not in all_cats:
-            match = next(
-                (c for c in all_cats if primary.lower() in c.lower()
-                 or c.lower() in primary.lower()),
-                None,
-            )
+            match = best_fuzzy_match(primary, list(all_cats))
             if match:
                 print(f"[INFO] [{state['media_id']}] Fuzzy matched primary {primary!r} → {match!r}")
                 primary = match
@@ -908,12 +956,10 @@ def scrape_characters(state: AgentState) -> AgentState:
         for m in all_members:
             raw_name = m['title']
 
-            # Skip placeholder "Unnamed ..." entries
             if re.match(r'unnamed\b', raw_name, re.IGNORECASE):
                 print(f"[DEBUG] [{media_id}] Skipping unnamed entry: {raw_name!r}")
                 continue
 
-            # Strip parenthetical disambiguation, e.g. "Yurga (Knight)" → "Yurga"
             name = re.sub(r'\s*\(.*?\)\s*$', '', raw_name).strip()
 
             wiki_page = f"https://{slug}.fandom.com/wiki/{raw_name.replace(' ', '_')}"
@@ -1007,10 +1053,10 @@ def build_graph() -> StateGraph:
     g = StateGraph(AgentState)
 
     g.add_node('search_wiki_candidates', search_wiki_candidates)
-    g.add_node('claude_pick_wiki',       claude_pick_wiki)
+    g.add_node('gemini_pick_wiki',       gemini_pick_wiki)
     g.add_node('fetch_media_metadata',   fetch_media_metadata)
     g.add_node('fetch_categories',       fetch_categories)
-    g.add_node('claude_pick_category',   claude_pick_category)
+    g.add_node('gemini_pick_category',   gemini_pick_category)
     g.add_node('scrape_characters',      scrape_characters)
     g.add_node('flag_no_scope',          flag_no_scope)
     g.add_node('flag_no_category',       flag_no_category)
@@ -1018,22 +1064,18 @@ def build_graph() -> StateGraph:
 
     g.set_entry_point('search_wiki_candidates')
 
-    # search → pick_wiki → fetch_metadata (best-effort, no error routing needed)
-    # → fetch_categories → pick_category
     for src, dst in [
-        ('search_wiki_candidates', 'claude_pick_wiki'),
-        ('claude_pick_wiki',       'fetch_media_metadata'),
+        ('search_wiki_candidates', 'gemini_pick_wiki'),
+        ('gemini_pick_wiki',       'fetch_media_metadata'),
         ('fetch_media_metadata',   'fetch_categories'),
-        ('fetch_categories',       'claude_pick_category'),
+        ('fetch_categories',       'gemini_pick_category'),
     ]:
-        # fetch_media_metadata never sets error, but we still guard the
-        # surrounding nodes so error propagation is consistent.
         g.add_conditional_edges(src, route_on_error, {
             'continue':     dst,
             'handle_error': 'handle_error',
         })
 
-    g.add_conditional_edges('claude_pick_category', route_on_strategy, {
+    g.add_conditional_edges('gemini_pick_category', route_on_strategy, {
         'scrape_characters': 'scrape_characters',
         'flag_no_scope':     'flag_no_scope',
         'flag_no_category':  'flag_no_category',
@@ -1060,16 +1102,10 @@ def run_media_agent(media_id: int) -> int:
     """
     Run the FandomGraph pipeline for *media_id*.
 
-    Cache guard
-    -----------
-    Before invoking the (expensive) LangGraph pipeline, check whether a
-    *different* MediaRequest for the same title + media_type has already
-    completed successfully.  If one is found, mark the current request as a
-    duplicate (status='dup', pointing at the cached id) and return the cached
-    id so the caller can redirect the user straight to the existing graph.
+    Cache guard: if a completed run for the same title + media_type already
+    exists, mark this request as a duplicate and return the cached id.
 
-    Returns the media_id that holds the usable graph — either *media_id* itself
-    (new run) or the cached id (duplicate).
+    Returns the media_id holding the usable graph.
     """
     media = MediaRequest.objects.get(id=media_id)
 

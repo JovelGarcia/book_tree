@@ -10,6 +10,7 @@ Depends on the character list produced by the wiki-discovery graph.
 from __future__ import annotations
 
 import json
+import os
 import operator
 import re
 import time
@@ -19,25 +20,33 @@ from typing import Annotated, TypedDict
 from urllib.parse import unquote
 
 import requests
-from anthropic import Anthropic, RateLimitError
+
+# ── New SDK imports ───────────────────────────────────────────────────────────
+from google import genai
+from google.genai import types as genai_types
+from google.genai import errors as genai_errors
+# ─────────────────────────────────────────────────────────────────────────────
+
 from django.utils import timezone
 from langgraph.graph import StateGraph, END
 from langgraph.types import Send
 
 from .models import Character, MediaRequest, Relationship
 
-
 # ── Constants ────────────────────────────────────────────────────────────────
 
-HEADERS        = {'User-Agent': 'FandomGraphBot/1.0 (educational project; contact via GitHub)'}
-CALL_DELAY     = 0.5          # seconds between Fandom API calls (sequential pre-fetch)
-MAX_PAGE_CHARS = 30_000       # truncation limit per page before sending to the LLM
-WORKER_MODEL   = "claude-haiku-4-5-20251001"
-SYNTH_MODEL    = "claude-sonnet-4-6"
-MIN_FUZZY_LEN  = 3            # minimum name length for substring matching
+HEADERS = {'User-Agent': 'FandomGraphBot/1.0 (educational project; contact via GitHub)'}
+CALL_DELAY = 0.5          # seconds between Fandom API calls (sequential pre-fetch)
+MAX_PAGE_CHARS = 30_000   # truncation limit per page before sending to the LLM
+WORKER_MODEL = "gemini-2.5-flash-lite"
+SYNTH_MODEL  = "gemini-2.5-pro"
+MIN_FUZZY_LEN = 3         # minimum name length for substring matching
 MAX_CONCURRENT_WORKERS = 3
 _worker_semaphore = threading.Semaphore(MAX_CONCURRENT_WORKERS)
-anthropic_client = Anthropic()
+
+# ── Gemini client (new SDK: one Client instance, used everywhere) ─────────────
+_gemini_client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -60,11 +69,11 @@ def _page_title_from_url(url: str) -> str:
 def _fetch_page_wikitext(slug: str, page_title: str) -> str:
     """Return raw wikitext for *page_title*, following redirects."""
     params = {
-        'action':    'parse',
-        'page':      page_title,
-        'prop':      'wikitext',
+        'action': 'parse',
+        'page': page_title,
+        'prop': 'wikitext',
         'redirects': 1,
-        'format':    'json',
+        'format': 'json',
     }
     try:
         r = _get(_api(slug), params=params)
@@ -112,37 +121,63 @@ def _default_scope(media: MediaRequest) -> str:
         f"beyond this specific work."
     )
 
+
 def _call_llm_with_backoff(
-    *,
-    model: str,
-    max_tokens: int,
-    tools: list,
-    tool_choice: dict,
-    messages: list,
-    media_id: int,
-    char_name: str,
-    max_retries: int = 6,
-    base_delay: float = 5.0,
-) -> dict:
+        *,
+        model_name: str,
+        tool: genai_types.Tool,
+        messages: list,
+        media_id: int,
+        context_name: str | None = None,
+        max_retries: int = 6,
+        base_delay: float = 5.0,
+) -> genai_types.GenerateContentResponse:
     """
-    Call the Anthropic API with exponential backoff + jitter on 429s.
+    Call the Gemini API (new google-genai SDK) with exponential backoff +
+    jitter on 429 / rate-limit errors.
+
+    Changes from the old SDK
+    ────────────────────────
+    • Uses the module-level ``_gemini_client`` instead of instantiating a
+      ``GenerativeModel`` per call.
+    • Tools are passed as a ``genai_types.Tool`` object inside a
+      ``genai_types.GenerateContentConfig``.
+    • ``tool_config`` uses ``genai_types.ToolConfig`` / ``FunctionCallingConfig``
+      instead of a raw dict.
+    • Rate-limit errors surface as ``genai_errors.ClientError`` with
+      ``status_code == 429`` (the new SDK does not re-export
+      ``google.api_core.exceptions``).
+    • ``contents`` accepts the same list-of-dicts format that the old SDK used
+      (the new SDK accepts plain dicts as well as typed objects).
+
     Raises the last exception if all retries are exhausted.
     """
+    config = genai_types.GenerateContentConfig(
+        tools=[tool],
+        tool_config=genai_types.ToolConfig(
+            function_calling_config=genai_types.FunctionCallingConfig(
+                mode="ANY",
+            )
+        ),
+    )
+
     for attempt in range(1, max_retries + 1):
         try:
-            return anthropic_client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                tools=tools,
-                tool_choice=tool_choice,
-                messages=messages,
+            return _gemini_client.models.generate_content(
+                model=model_name,
+                contents=messages,
+                config=config,
             )
-        except RateLimitError as exc:
+        except genai_errors.ClientError as exc:
+            # The new SDK raises ClientError; 429 = RESOURCE_EXHAUSTED
+            if getattr(exc, 'status_code', None) != 429:
+                raise
             if attempt == max_retries:
                 raise
             delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 2)
+            context_str = f" for {context_name!r}" if context_name else ""
             print(
-                f"[WARNING] [{media_id}] Worker: rate-limited on {char_name!r} "
+                f"[WARNING] [{media_id}] API call rate-limited{context_str} "
                 f"(attempt {attempt}/{max_retries}). "
                 f"Retrying in {delay:.1f}s…"
             )
@@ -177,18 +212,16 @@ def _infer_and_save_aliases(characters: list, media_id: int) -> None:
     """
     all_names_lower = {c.name.lower() for c in characters}
 
-    # Collect suffix → list of characters that share it
     from collections import defaultdict
     suffix_groups: dict[str, list] = defaultdict(list)
 
     for c in characters:
         tokens = c.name.split()
         if len(tokens) >= 2:
-            # "au Grimmus" = everything after the first token
             suffix = " ".join(tokens[1:]).lower()
             suffix_groups[suffix].append(c)
 
-    to_update: list[tuple] = []   # (Character, new_alias)
+    to_update: list[tuple] = []  # (Character, new_alias)
 
     # Rule A — shared suffix
     for suffix, group in suffix_groups.items():
@@ -197,8 +230,8 @@ def _infer_and_save_aliases(characters: list, media_id: int) -> None:
         for c in group:
             first_token = c.name.split()[0]
             if (
-                len(first_token) >= MIN_FUZZY_LEN
-                and first_token.lower() not in all_names_lower
+                    len(first_token) >= MIN_FUZZY_LEN
+                    and first_token.lower() not in all_names_lower
             ):
                 to_update.append((c, first_token))
 
@@ -212,8 +245,8 @@ def _infer_and_save_aliases(characters: list, media_id: int) -> None:
             continue
         first_token = tokens[0]
         if (
-            len(first_token) >= MIN_FUZZY_LEN
-            and first_token.lower() not in all_names_lower
+                len(first_token) >= MIN_FUZZY_LEN
+                and first_token.lower() not in all_names_lower
         ):
             to_update.append((c, first_token))
 
@@ -233,145 +266,161 @@ def _infer_and_save_aliases(characters: list, media_id: int) -> None:
 
 class WorkItem(TypedDict):
     """One character prepared for the worker, including pre-fetched content."""
-    name:         str
-    wiki_page:    str
-    page_content: str          # cleaned wikitext (may be empty if fetch failed)
+    name: str
+    wiki_page: str
+    page_content: str  # cleaned wikitext (may be empty if fetch failed)
 
 
 class ExtractedRelationship(TypedDict):
-    source:            str
-    target:            str
+    source: str
+    target: str
     relationship_type: str
-    description:       str
+    description: str
 
 
 class ExtractionResult(TypedDict):
     character_name: str
-    relationships:  list[ExtractedRelationship]
-    page_found:     bool
-    error:          str | None
+    relationships: list[ExtractedRelationship]
+    page_found: bool
+    error: str | None
 
 
 class WorkerInput(TypedDict):
     """Payload delivered to each worker via Send."""
-    media_id:          int
-    title:             str
-    media_type:        str
+    media_id: int
+    title: str
+    media_type: str
     scope_description: str
-    wiki_slug:         str
-    character_name:    str
-    wiki_page:         str
-    page_content:      str
+    wiki_slug: str
+    character_name: str
+    wiki_page: str
+    page_content: str
 
 
 class OrchestratorState(TypedDict):
     """Top-level graph state shared across all nodes."""
-    media_id:          int
-    title:             str
-    media_type:        str
+    media_id: int
+    title: str
+    media_type: str
     scope_description: str
-    wiki_slug:         str
+    wiki_slug: str
 
-    characters:        list[dict]          # raw DB rows
-    work_items:        list[WorkItem]      # populated by orchestrator
+    characters: list[dict]   # raw DB rows
+    work_items: list[WorkItem]  # populated by orchestrator
 
     # ↓ accumulated across parallel workers via operator.add reducer
-    extraction_results:     Annotated[list, operator.add]
+    extraction_results: Annotated[list, operator.add]
 
     resolved_relationships: list[dict]
-    conflicts:              list[dict]
-    error:                  str | None
+    conflicts: list[dict]
+    error: str | None
 
 
-# ── Tool Schemas ─────────────────────────────────────────────────────────────
+# ── Tool Schemas (new SDK: genai_types.Tool / FunctionDeclaration) ────────────
+#
+# Old SDK used plain dicts; new SDK uses typed Pydantic objects:
+#   genai_types.Tool(function_declarations=[genai_types.FunctionDeclaration(...)])
+#
+# The parameters schema dict remains identical — only the wrapper changes.
+# ─────────────────────────────────────────────────────────────────────────────
 
-EXTRACT_RELATIONSHIPS_TOOL = {
-    "name": "extract_relationships",
-    "description": (
-        "Extract character relationships from a wiki page, "
-        "strictly within the specified scope boundary."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "relationships": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "target": {
-                            "type": "string",
-                            "description": "Full name of the other character.",
-                        },
-                        "relationship_type": {
-                            "type": "string",
-                            "enum": [
-                                "family", "romantic", "ally", "enemy",
-                                "mentor", "subordinate", "rival", "friend",
-                                "acquaintance", "other",
-                            ],
-                            "description": "Primary category of the relationship.",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": (
-                                "Concise (1–2 sentence) description. "
-                                "Be specific: 'father', 'commanding officer' — "
-                                "not just 'family' or 'ally'."
-                            ),
-                        },
-                    },
-                    "required": ["target", "relationship_type", "description"],
+EXTRACT_RELATIONSHIPS_TOOL = genai_types.Tool(
+    function_declarations=[
+        genai_types.FunctionDeclaration(
+            name="extract_relationships",
+            description=(
+                "Extract character relationships from a wiki page, "
+                "strictly within the specified scope boundary."
+            ),
+            parameters=genai_types.Schema(
+                type="OBJECT",
+                properties={
+                    "relationships": genai_types.Schema(
+                        type="ARRAY",
+                        items=genai_types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "target": genai_types.Schema(
+                                    type="STRING",
+                                    description="Full name of the other character.",
+                                ),
+                                "relationship_type": genai_types.Schema(
+                                    type="STRING",
+                                    enum=[
+                                        "family", "romantic", "ally", "enemy",
+                                        "mentor", "subordinate", "rival", "friend",
+                                        "acquaintance", "other",
+                                    ],
+                                    description="Primary category of the relationship.",
+                                ),
+                                "description": genai_types.Schema(
+                                    type="STRING",
+                                    description=(
+                                        "Concise (1–2 sentence) description. "
+                                        "Be specific: 'father', 'commanding officer' — "
+                                        "not just 'family' or 'ally'."
+                                    ),
+                                ),
+                            },
+                            required=["target", "relationship_type", "description"],
+                        ),
+                    ),
                 },
-            }
-        },
-        "required": ["relationships"],
-    },
-}
+                required=["relationships"],
+            ),
+        )
+    ]
+)
 
-RESOLVE_CONFLICTS_TOOL = {
-    "name": "resolve_conflicts",
-    "description": (
-        "Resolve conflicting relationship data extracted from "
-        "different character pages for the same character pair."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "resolutions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source":               {"type": "string"},
-                        "target":               {"type": "string"},
-                        "resolved_type": {
-                            "type": "string",
-                            "enum": [
-                                "family", "romantic", "ally", "enemy",
-                                "mentor", "subordinate", "rival", "friend",
-                                "acquaintance", "other",
+RESOLVE_CONFLICTS_TOOL = genai_types.Tool(
+    function_declarations=[
+        genai_types.FunctionDeclaration(
+            name="resolve_conflicts",
+            description=(
+                "Resolve conflicting relationship data extracted from "
+                "different character pages for the same character pair."
+            ),
+            parameters=genai_types.Schema(
+                type="OBJECT",
+                properties={
+                    "resolutions": genai_types.Schema(
+                        type="ARRAY",
+                        items=genai_types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "source": genai_types.Schema(type="STRING"),
+                                "target": genai_types.Schema(type="STRING"),
+                                "resolved_type": genai_types.Schema(
+                                    type="STRING",
+                                    enum=[
+                                        "family", "romantic", "ally", "enemy",
+                                        "mentor", "subordinate", "rival", "friend",
+                                        "acquaintance", "other",
+                                    ],
+                                ),
+                                "resolved_description": genai_types.Schema(
+                                    type="STRING",
+                                ),
+                                "reasoning": genai_types.Schema(
+                                    type="STRING",
+                                    description=(
+                                        "Why this resolution was chosen over the "
+                                        "conflicting alternatives."
+                                    ),
+                                ),
+                            },
+                            required=[
+                                "source", "target", "resolved_type",
+                                "resolved_description", "reasoning",
                             ],
-                        },
-                        "resolved_description": {"type": "string"},
-                        "reasoning": {
-                            "type": "string",
-                            "description": (
-                                "Why this resolution was chosen over the "
-                                "conflicting alternatives."
-                            ),
-                        },
-                    },
-                    "required": [
-                        "source", "target", "resolved_type",
-                        "resolved_description", "reasoning",
-                    ],
+                        ),
+                    ),
                 },
-            },
-        },
-        "required": ["resolutions"],
-    },
-}
+                required=["resolutions"],
+            ),
+        )
+    ]
+)
 
 
 # ── Node 1 · orchestrator ────────────────────────────────────────────────────
@@ -382,7 +431,7 @@ def orchestrator(state: OrchestratorState) -> OrchestratorState:
     wiki page (with a polite delay) so workers only need to call the LLM.
     """
     media_id = state['media_id']
-    slug     = state['wiki_slug']
+    slug = state['wiki_slug']
 
     # ── Load characters ──────────────────────────────────────────────────
     characters = [
@@ -475,7 +524,7 @@ def fan_out_to_workers(state: OrchestratorState) -> list[Send]:
     sends: list[Send] = []
     for item in state['work_items']:
         if not item['page_content']:
-            continue                           # skip characters with empty pages
+            continue  # skip characters with empty pages
 
         sends.append(Send("worker", WorkerInput(
             media_id=state['media_id'],
@@ -505,14 +554,14 @@ def worker(state: WorkerInput) -> dict:
     to extract scoped relationships.
 
     Concurrency is throttled via _worker_semaphore to avoid blowing the
-    30k TPM org rate limit when many workers fire in parallel.
+    rate limit when many workers fire in parallel.
 
     Returns ``{'extraction_results': [ExtractionResult]}`` which merges
     into the parent state via the ``operator.add`` reducer.
     """
-    char_name    = state['character_name']
+    char_name = state['character_name']
     page_content = state['page_content']
-    media_id     = state['media_id']
+    media_id = state['media_id']
 
     print(f"[INFO] [{media_id}] Worker: queued {char_name!r}, waiting for slot…")
 
@@ -520,14 +569,12 @@ def worker(state: WorkerInput) -> dict:
         print(f"[INFO] [{media_id}] Worker: extracting relationships for {char_name!r}")
 
         try:
-            message = _call_llm_with_backoff(
-                model=WORKER_MODEL,
-                max_tokens=2048,
-                tools=[EXTRACT_RELATIONSHIPS_TOOL],
-                tool_choice={"type": "tool", "name": "extract_relationships"},
+            response = _call_llm_with_backoff(
+                model_name=WORKER_MODEL,
+                tool=EXTRACT_RELATIONSHIPS_TOOL,
                 messages=[{
                     "role": "user",
-                    "content": f"""You are extracting character relationship data from a wiki page.
+                    "parts": [{"text": f"""You are extracting character relationship data from a wiki page.
 
 ━━━ SCOPE CONSTRAINT (CRITICAL) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {state['scope_description']}
@@ -566,14 +613,17 @@ INSTRUCTIONS:
   4. Be specific in descriptions — "father", "commanding officer",
      "childhood friend" — not bare category labels.
   5. Return an empty list if no in-scope relationships are found.
-""",
+"""}],
                 }],
                 media_id=media_id,
-                char_name=char_name,
+                context_name=char_name,
             )
 
-            tool_input = next(b.input for b in message.content if b.type == "tool_use")
-            raw_rels   = tool_input["relationships"]
+            # Response parsing is identical — the new SDK returns the same
+            # candidates[0].content.parts[0].function_call structure.
+            tool_call = response.candidates[0].content.parts[0].function_call
+            tool_input = {k: v for k, v in tool_call.args.items()}
+            raw_rels = tool_input.get("relationships", [])
 
             print(
                 f"[INFO] [{media_id}] Worker: {char_name} → "
@@ -616,7 +666,7 @@ def synthesizer(state: OrchestratorState) -> OrchestratorState:
     LLM call, and persist the final graph.
     """
     media_id = state['media_id']
-    results  = state['extraction_results']
+    results = state['extraction_results']
 
     # ── 1. Gather raw relationships ──────────────────────────────────────
     all_rels: list[ExtractedRelationship] = []
@@ -667,8 +717,6 @@ def synthesizer(state: OrchestratorState) -> OrchestratorState:
     char_qs = list(Character.objects.filter(media_id=media_id))
 
     # -- 2b. Build lookup: every known string → canonical Character -------
-    #  Priority order (later entries can overwrite earlier ones):
-    #    full name (lowest) → alias entries (higher) → exact name (highest)
     name_to_char: dict[str, Character] = {}
 
     for c in char_qs:
@@ -677,7 +725,6 @@ def synthesizer(state: OrchestratorState) -> OrchestratorState:
             if alias and len(alias.strip()) >= MIN_FUZZY_LEN:
                 name_to_char[alias.strip().lower()] = c
 
-    # known_chars keeps the str→str mapping the rest of synthesizer uses
     known_chars: dict[str, str] = {k: v.name for k, v in name_to_char.items()}
 
     def _normalize(name: str) -> str:
@@ -713,20 +760,19 @@ def synthesizer(state: OrchestratorState) -> OrchestratorState:
         pair_map.setdefault(key, []).append(rel)
 
     # ── 4. Separate agreed pairs from conflicts ──────────────────────────
-    conflicts:  list[dict] = []
+    conflicts: list[dict] = []
     clean_rels: list[ExtractedRelationship] = []
 
     for pair_key, rels in pair_map.items():
         types = {r['relationship_type'] for r in rels}
         if len(types) <= 1:
-            # Agreement — keep the most descriptive entry
             best = max(rels, key=lambda r: len(r.get('description', '')))
             clean_rels.append(best)
         else:
             conflicts.append({
-                'pair':        list(pair_key),
+                'pair': list(pair_key),
                 'extractions': [dict(r) for r in rels],
-                'types':       list(types),
+                'types': list(types),
             })
 
     print(
@@ -754,14 +800,12 @@ def synthesizer(state: OrchestratorState) -> OrchestratorState:
                     )
                 block_parts.append("\n".join(lines))
 
-            message = anthropic_client.messages.create(
-                model=SYNTH_MODEL,
-                max_tokens=2048,
-                tools=[RESOLVE_CONFLICTS_TOOL],
-                tool_choice={"type": "tool", "name": "resolve_conflicts"},
+            response = _call_llm_with_backoff(
+                model_name=SYNTH_MODEL,
+                tool=RESOLVE_CONFLICTS_TOOL,
                 messages=[{
                     "role": "user",
-                    "content": f"""Resolve conflicting character relationship data.
+                    "parts": [{"text": f"""Resolve conflicting character relationship data.
 
 TITLE : {state['title']}
 SCOPE : {state['scope_description']}
@@ -779,11 +823,23 @@ RESOLUTION GUIDELINES:
 
 CONFLICTS TO RESOLVE:
 {chr(10).join(block_parts)}
-""",
+"""}],
                 }],
+                media_id=media_id,
+                context_name="Conflict-Resolution-Synthesizer",
             )
 
-            tool_input = next((b.input for b in message.content if b.type == "tool_use"), {})
+            tool_input = {}
+            if (
+                response.candidates
+                and response.candidates[0].content.parts
+                and response.candidates[0].content.parts[0].function_call
+            ):
+                tool_call = response.candidates[0].content.parts[0].function_call
+                tool_input = {k: v for k, v in tool_call.args.items()}
+            else:
+                print(f"[WARNING] [{media_id}] Synthesizer LLM did not return a tool call.")
+
             resolutions = tool_input.get("resolutions") or []
 
             for res in resolutions:
@@ -814,11 +870,11 @@ CONFLICTS TO RESOLVE:
     # ── 6. Merge & persist ───────────────────────────────────────────────
     final_rels = clean_rels + resolved_from_conflicts
 
-    media     = MediaRequest.objects.get(id=media_id)
+    media = MediaRequest.objects.get(id=media_id)
     char_objs = {c.name: c for c in Character.objects.filter(media=media)}
-    char_low  = {k.lower(): v for k, v in char_objs.items()}
+    char_low = {k.lower(): v for k, v in char_objs.items()}
 
-    saved   = 0
+    saved = 0
     skipped = 0
 
     for rel in final_rels:
@@ -832,7 +888,7 @@ CONFLICTS TO RESOLVE:
                 target=tgt,
                 defaults={
                     'relationship_type': rel['relationship_type'],
-                    'description':       rel['description'],
+                    'description': rel['description'],
                 },
             )
             saved += 1
@@ -849,7 +905,7 @@ CONFLICTS TO RESOLVE:
             )
 
     # ── 7. Mark complete ─────────────────────────────────────────────────
-    media.status       = 'c'
+    media.status = 'c'
     media.completed_at = timezone.now()
     media.save(update_fields=['status', 'completed_at'])
 
@@ -862,8 +918,8 @@ CONFLICTS TO RESOLVE:
     return {
         **state,
         'resolved_relationships': [dict(r) for r in final_rels],
-        'conflicts':              conflicts,
-        'error':                  None,
+        'conflicts': conflicts,
+        'error': None,
     }
 
 
@@ -871,7 +927,7 @@ CONFLICTS TO RESOLVE:
 
 def handle_error(state: OrchestratorState) -> OrchestratorState:
     media_id = state.get('media_id', '?')
-    error    = state.get('error', 'unknown error')
+    error = state.get('error', 'unknown error')
     print(f"[ERROR] [{media_id}] Relationship extraction failed: {error}")
     MediaRequest.objects.filter(id=media_id).update(
         status='rf',
@@ -886,23 +942,20 @@ def build_relationship_graph() -> StateGraph:
     g = StateGraph(OrchestratorState)
 
     g.add_node('orchestrator', orchestrator)
-    g.add_node('worker',       worker)
-    g.add_node('synthesizer',  synthesizer)
+    g.add_node('worker', worker)
+    g.add_node('synthesizer', synthesizer)
     g.add_node('handle_error', handle_error)
 
     g.set_entry_point('orchestrator')
 
-    # Orchestrator fans out: one Send per character → worker,
-    # or a single Send → handle_error if something went wrong.
     g.add_conditional_edges(
         'orchestrator',
         fan_out_to_workers,
         ['worker', 'handle_error'],
     )
 
-    # All workers converge into the synthesizer (reducer merges results).
-    g.add_edge('worker',       'synthesizer')
-    g.add_edge('synthesizer',  END)
+    g.add_edge('worker', 'synthesizer')
+    g.add_edge('synthesizer', END)
     g.add_edge('handle_error', END)
 
     return g.compile()
@@ -914,8 +967,8 @@ relationship_graph = build_relationship_graph()
 # ── Public entry point ───────────────────────────────────────────────────────
 
 def run_relationship_extraction(
-    media_id: int,
-    scope_description: str | None = None,
+        media_id: int,
+        scope_description: str | None = None,
 ) -> None:
     """
     Extract scoped character relationships for a media title whose
@@ -938,7 +991,6 @@ def run_relationship_extraction(
     """
     media = MediaRequest.objects.get(id=media_id)
 
-    # ── Pre-flight checks ────────────────────────────────────────────────
     if not media.wiki_slug:
         raise ValueError(
             f"No wiki_slug set for '{media.title}' (media_id={media_id}). "
@@ -960,15 +1012,15 @@ def run_relationship_extraction(
     )
 
     relationship_graph.invoke({
-        'media_id':               media_id,
-        'title':                  media.title,
-        'media_type':             media.media_type,
-        'scope_description':      scope,
-        'wiki_slug':              media.wiki_slug,
-        'characters':             [],
-        'work_items':             [],
-        'extraction_results':     [],
+        'media_id': media_id,
+        'title': media.title,
+        'media_type': media.media_type,
+        'scope_description': scope,
+        'wiki_slug': media.wiki_slug,
+        'characters': [],
+        'work_items': [],
+        'extraction_results': [],
         'resolved_relationships': [],
-        'conflicts':              [],
-        'error':                  None,
+        'conflicts': [],
+        'error': None,
     })
