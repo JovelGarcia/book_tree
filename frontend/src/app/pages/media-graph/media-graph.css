@@ -5,6 +5,8 @@
   display: block;
   width: 100vw;
   height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
   background: #1e2128;
   overflow: hidden;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
@@ -28,6 +30,7 @@ svg {
   height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* ── media info (title + fandom link) ───────────────────── */
@@ -115,11 +118,13 @@ svg {
 .graph-body {
   flex: 1;
   position: relative;
+  overflow: hidden;
 }
 
 .graph-container {
   width: 100%;
   height: 100%;
+  overflow: hidden;
 }
 
 /* ── overlays ────────────────────────────────────────────── */
@@ -136,6 +141,7 @@ svg {
   background: rgba(30,33,40,.85);
   color: #cbd5e1;
 }
+
 
 .error-msg { color: #fca5a5; }
 

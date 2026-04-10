@@ -169,12 +169,34 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
     const cx0 = W / 2;
     const cy0 = H / 2;
 
-    // ── SVG: plain (0,0) origin ──────────────────────────────────
+    // ── Pre-tick: run sim headlessly so nodes are already settled
+    //    before the first pixel is painted. 300 ticks ≈ full alpha
+    //    decay; usually completes in < 10 ms for typical graph sizes. ──
+    const preSim = d3.forceSimulation<GNode, GLink>(nodes)
+      .force('x',       d3.forceX<GNode>(cx0).strength(0.1))
+      .force('y',       d3.forceY<GNode>(cy0).strength(0.1))
+      .force('link',    d3.forceLink<GNode, GLink>(links)
+                            .id(d => d.id)
+                            .distance(-500))
+      .force('charge',  d3.forceManyBody<GNode>()
+                            .strength(-1000)
+                            .distanceMin(30)
+                            .theta(0.9))
+      .force('collide', d3.forceCollide<GNode>(60).strength(0.5))
+      .stop();
+
+    const maxTicks = Math.ceil(
+      Math.log(preSim.alphaMin()) / Math.log(1 - preSim.alphaDecay())
+    );
+    for (let i = 0; i < Math.min(maxTicks, 300); i++) preSim.tick();
+
+    // ── SVG ─────────────────────────────────────────────────────
     this.svg = d3.select(el)
       .append('svg')
       .attr('width',   '100%')
       .attr('height',  '100%')
-      .attr('viewBox', `0 0 ${W} ${H}`);          // ← KEY FIX
+      .attr('viewBox', `0 0 ${W} ${H}`)
+      .style('opacity', '0');     // hidden until zoom transform is ready
 
     const g = this.svg.append('g');
 
@@ -184,12 +206,6 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
 
     this.svg.call(this.zoom);
 
-    // seed nodes near canvas center so sim doesn't start at (0,0)
-    for (const n of nodes) {
-      n.x = cx0 + (Math.random() - 0.5) * 80;
-      n.y = cy0 + (Math.random() - 0.5) * 80;
-    }
-
     /* ─── edges ─── */
     const linkSel = g.append('g')
       .selectAll<SVGLineElement, GLink>('line')
@@ -197,7 +213,12 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
       .join('line')
       .attr('stroke',         d => clr(d.type))
       .attr('stroke-opacity', 0.45)
-      .attr('stroke-width',   1.5);
+      .attr('stroke-width',   1.5)
+      // Paint at already-settled positions
+      .attr('x1', d => (d.source as GNode).x!)
+      .attr('y1', d => (d.source as GNode).y!)
+      .attr('x2', d => (d.target as GNode).x!)
+      .attr('y2', d => (d.target as GNode).y!);
 
     linkSel
       .on('pointerenter', (ev: PointerEvent, d) => {
@@ -221,6 +242,8 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
       .data(nodes)
       .join('g')
       .style('cursor', 'grab')
+      // Paint at already-settled positions
+      .attr('transform', d => `translate(${d.x},${d.y})`)
       .call(this.makeDrag() as any);
 
     nodeSel.append('circle')
@@ -238,7 +261,6 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
       .attr('fill',          '#cbd5e1')
       .attr('pointer-events','none');
 
-    // ── hover: fade non-connected nodes/edges ────────────────
     const connectedIds = (d: GNode): Set<number> => {
       const ids = new Set<number>();
       links.forEach(l => {
@@ -253,9 +275,7 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
     nodeSel
       .on('pointerenter', (ev: PointerEvent, d) => {
         const neighbors = connectedIds(d);
-        // fade unrelated nodes
         nodeSel.attr('opacity', n => (n.id === d.id || neighbors.has(n.id)) ? 1 : 0.08);
-        // fade unrelated edges
         linkSel.attr('stroke-opacity', l => {
           const s = (l.source as GNode).id;
           const t = (l.target as GNode).id;
@@ -274,10 +294,16 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
         this.hideTip(tip);
       });
 
-    /* ─── force sim ─── forces target canvas center (cx0, cy0) ── */
+    // ── Apply fit transform instantly (duration 0), THEN fade in ──
+    this.applyFitTransform(nodes, 0);
+    requestAnimationFrame(() => {
+      this.svg!.transition().duration(500).style('opacity', '1');
+    });
+
+    /* ─── live sim: just a gentle cool-down from settled positions ── */
     this.sim = d3.forceSimulation<GNode, GLink>(nodes)
-      .force('x',       d3.forceX<GNode>(cx0).strength(0.1))   // ← KEY FIX
-      .force('y',       d3.forceY<GNode>(cy0).strength(0.1))   // ← KEY FIX
+      .force('x',       d3.forceX<GNode>(cx0).strength(0.1))
+      .force('y',       d3.forceY<GNode>(cy0).strength(0.1))
       .force('link',    d3.forceLink<GNode, GLink>(links)
                             .id(d => d.id)
                             .distance(250))
@@ -286,6 +312,8 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
                             .distanceMin(30)
                             .theta(0.9))
       .force('collide', d3.forceCollide<GNode>(60).strength(0.5))
+      .alpha(0.08)        // start nearly cold — just a gentle final nudge
+      .alphaDecay(0.05)   // decays to rest within ~2 s
       .on('tick', () => {
         linkSel
           .attr('x1', d => (d.source as GNode).x!)
@@ -293,26 +321,18 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
           .attr('x2', d => (d.target as GNode).x!)
           .attr('y2', d => (d.target as GNode).y!);
         nodeSel.attr('transform', d => `translate(${d.x},${d.y})`);
-      })
-      .on('end', () => this.zoomToFit(600));
+      });
 
     /* ─── responsive viewBox ─── */
     this.initialResizeFired = false;
     this.ro = new ResizeObserver(() => {
-      // Skip the very first fire — it's just the initial layout measurement
-      // and would reset the viewBox before zoomToFit runs.
-      if (!this.initialResizeFired) {
-        this.initialResizeFired = true;
-        return;
-      }
-
-      // Debounce so rapid resize events don't thrash
+      if (!this.initialResizeFired) { this.initialResizeFired = true; return; }
       if (this.roTimer) clearTimeout(this.roTimer);
       this.roTimer = setTimeout(() => {
         const w = el.clientWidth, h = el.clientHeight;
         if (w && h) {
           this.svg!.attr('viewBox', `0 0 ${w} ${h}`);
-          this.zoomToFit(300);   // re-fit after resize
+          this.zoomToFit(300);
         }
       }, 150);
     });
@@ -321,11 +341,10 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
 
   // ── zoom to fit ──────────────────────────────────────────────
 
-  private zoomToFit(durationMs = 750) {
-    if (!this.sim || !this.svg || !this.zoom) return;
-    const nodes = this.sim.nodes();
-    if (!nodes.length) return;
-
+  // Instant, no-transition version used at init so the SVG is
+  // already at the right scale before we fade it in.
+  private applyFitTransform(nodes: GNode[], durationMs = 0) {
+    if (!this.svg || !this.zoom) return;
     const el  = this.boxRef.nativeElement;
     const W   = el.clientWidth  || 960;
     const H   = el.clientHeight || 600;
@@ -344,15 +363,20 @@ export class MediaGraph implements AfterViewInit, OnDestroy {
     const k  = Math.min((W - 2 * pad) / bw, (H - 2 * pad) / bh, 2);
     const cx = (x0 + x1) / 2;
     const cy = (y0 + y1) / 2;
-
-    // translate bounding-box center → viewport center          ← KEY FIX
     const tx = W / 2 - k * cx;
     const ty = H / 2 - k * cy;
 
-    this.svg.transition().duration(durationMs).call(
-      this.zoom.transform,
-      d3.zoomIdentity.translate(tx, ty).scale(k),
-    );
+    const t = d3.zoomIdentity.translate(tx, ty).scale(k);
+    if (durationMs === 0) {
+      this.svg.call(this.zoom.transform, t);
+    } else {
+      this.svg.transition().duration(durationMs).call(this.zoom.transform, t);
+    }
+  }
+
+  private zoomToFit(durationMs = 750) {
+    if (!this.sim) return;
+    this.applyFitTransform(this.sim.nodes(), durationMs);
   }
 
   // ── drag ─────────────────────────────────────────────────────
