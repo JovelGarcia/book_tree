@@ -9,6 +9,7 @@ class MediaRequest(models.Model):
         ('movie', 'Movie'),
         ('game',  'Game'),
         ('book',  'Book'),
+        ('wiki',  'Wiki (whole)'),   # dedicated wiki, unscoped — characters from entire wiki
     ]
     STATUS_CHOICES = [
         ('p',   'Pending'),

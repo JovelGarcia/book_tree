@@ -918,6 +918,16 @@ def scrape_characters(state: AgentState) -> AgentState:
     slug     = state['wiki_slug']
     category = state['chosen_category']
     media_id = state['media_id']
+    strategy = state.get('resolution_strategy')
+
+    # For dedicated-but-unscoped wikis (e.g. Little Women, Jujutsu Kaisen on an
+    # umbrella-style dedicated wiki) we have no title-scoped category, so we
+    # scrape the whole wiki's character list.  Re-type the record so the frontend
+    # can display "Wiki (whole)" rather than the original (possibly wrong) type.
+    if strategy == 'dedicated_unscoped':
+        MediaRequest.objects.filter(id=media_id).update(media_type='wiki')
+        state = {**state, 'media_type': 'wiki'}
+        print(f"[INFO] [{media_id}] dedicated_unscoped — retyped media_type to 'wiki', scraping whole-wiki character list")
 
     try:
         all_members: list[dict] = []
@@ -1040,10 +1050,8 @@ def route_on_strategy(state: AgentState) -> str:
     if state.get('error'):
         return 'handle_error'
     strategy = state.get('resolution_strategy')
-    if strategy in ('dedicated_scoped', 'umbrella_scoped'):
+    if strategy in ('dedicated_scoped', 'umbrella_scoped', 'dedicated_unscoped'):
         return 'scrape_characters'
-    if strategy == 'dedicated_unscoped':
-        return 'flag_no_scope'
     return 'flag_no_category'
 
 
@@ -1058,7 +1066,6 @@ def build_graph() -> StateGraph:
     g.add_node('fetch_categories',       fetch_categories)
     g.add_node('gemini_pick_category',   gemini_pick_category)
     g.add_node('scrape_characters',      scrape_characters)
-    g.add_node('flag_no_scope',          flag_no_scope)
     g.add_node('flag_no_category',       flag_no_category)
     g.add_node('handle_error',           handle_error)
 
@@ -1077,7 +1084,6 @@ def build_graph() -> StateGraph:
 
     g.add_conditional_edges('gemini_pick_category', route_on_strategy, {
         'scrape_characters': 'scrape_characters',
-        'flag_no_scope':     'flag_no_scope',
         'flag_no_category':  'flag_no_category',
         'handle_error':      'handle_error',
     })
@@ -1086,7 +1092,6 @@ def build_graph() -> StateGraph:
         'continue':     END,
         'handle_error': 'handle_error',
     })
-    g.add_edge('flag_no_scope',    END)
     g.add_edge('flag_no_category', END)
     g.add_edge('handle_error',     END)
 

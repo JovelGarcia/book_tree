@@ -79,7 +79,7 @@ def relationship_list_api(request, id):
 
 @api_view(['GET'])
 def media_recent_api(request):
-    qs = MediaRequest.objects.order_by('-submitted_at')[:20]
+    qs = MediaRequest.objects.filter(status='c').order_by('-submitted_at')[:20]
     return Response(MediaRequestSerializer(qs, many=True).data)
 
 
